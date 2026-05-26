@@ -159,11 +159,12 @@
  integer,public:: num_months          !number of months                                         [-]
 
  integer,public:: num_chem             !Temporary workaround for defining dimensions holding chem data
- integer,public:: kanthro,kbiogenic,kwildfire,kvolcanic,kreswoodcomb!Number of vertical levels in input emission data
+ integer,public:: kanthro,kbiogenic,kwildfire,kvolcanic!Number of vertical levels in input emission data
  logical:: do_chemistry                !controls call to smoke, dust and other chemical processes
 
  integer,public:: num_e_ant_in,num_e_bb_in,num_e_bio_in,num_e_vol_in
  integer,public:: num_e_ant_out,num_e_bb_out,num_e_bio_out,num_e_dust_out,num_e_ss_out,num_e_vol_out
+ integer,public:: num_anthro_pt,num_e_ant_pt_in,num_e_ant_stack_groups_in ! Number of EGUs (dynamic by file), Number of EGU emissions
 
  real(kind=RKIND),public:: dt_dyn     !time-step for dynamics
  real(kind=RKIND),public:: dt_microp  !time-step for cloud microphysics parameterization.
@@ -243,11 +244,13 @@
  real(kind=RKIND),dimension(:,:),allocatable:: &
     vis_p
  real(kind=RKIND),dimension(:,:,:),allocatable:: &
-    PM1_p, PM2_5_p, PM10_p
+    PM1_p, PM2_5_p, PM10_p, PM2_5_SOA_p, PM2_5_SMOKE_SOA_p,PM2_5_ANT_SOA_p
  real(kind=RKIND),dimension(:,:,:),allocatable:: &
-    aod3d_smoke_p, aod3d_p
+    soa_p, bbsoa_p, antsoa_p, bbvoc_p, antvoc_p
+ real(kind=RKIND),dimension(:,:,:),allocatable:: &
+    aod3d_smoke_p, aod3d_p, aod3d_simple_p
  real(kind=RKIND),dimension(:,:),allocatable:: &
-    aod550_p
+    aod550_p, aod550_simple_p
  real(kind=RKIND),dimension(:,:),allocatable:: &
     aero_emis_for_enhmix_p
 ! Input/output smoke 2D fields - JLS
@@ -271,11 +274,10 @@
     fmc_avg_p,         &
     emis_ant_no_p
  integer,dimension(:,:),allocatable:: &
-    eco_id_p !JR
+    ecoregion_ID_p !JR
 ! RWC fields
  real(kind=RKIND),dimension(:,:),allocatable:: &
-    RWC_denominator_p
- real(kind=RKIND),dimension(:,:,:),allocatable:: &
+    RWC_denominator_p,&
     RWC_annual_sum_p,&
     RWC_annual_sum_smoke_fine_p,&
     RWC_annual_sum_smoke_coarse_p,&
@@ -287,19 +289,22 @@
     hwp_avg_p
  integer,dimension(:,:),allocatable:: &
     min_bb_plume_p, &!
-    max_bb_plume_p
+    max_bb_plume_p, &!
+    max_rwc_plume_p
 ! Input dust 2D fields - JLS
  real(kind=RKIND),dimension(:,:),allocatable:: &
     clayfrac_in_p,       &!
     sandfrac_in_p,       &!
     uthres_in_p,         &!
-    uthres_sg_in_p,      &!
-    albedo_drag_p,       &!
-    feff_p,              &!
-    sep_in_p              !
+    rdrag_p,             &!
+    ssm_in_p              !
 ! Input biomass burning emissions - JLS
  real(kind=RKIND),dimension(:,:,:,:),allocatable:: &
     e_ant_in_p, e_bb_in_p, e_bio_in_p, e_vol_in_p
+ real(kind=RKIND),dimension(:,:,:),allocatable:: &
+    e_ant_pt_in_p
+ real(kind=RKIND),dimension(:,:),allocatable:: &
+    e_ant_stack_groups_in_p
  real(kind=RKIND),dimension(:,:,:,:),allocatable:: &
     e_ant_out_p, e_bb_out_p, e_bio_out_p, e_dust_out_p, e_ss_out_p, e_vol_out_p
       
@@ -362,6 +367,10 @@
  logical :: &
     f_smoke_fine,     &!parameter set to true to include the smoke mixing ratio.
     f_smoke_coarse,   &
+    f_bbsoa,          &
+    f_antsoa,         &
+    f_bbvoc,          &
+    f_antvoc,         &
     f_polp_all,       &
     f_polp_tree,      &
     f_polp_grass,     &
@@ -855,10 +864,16 @@
 
  real(kind=RKIND),dimension(:,:),allocatable  ::   taod5502d_p!total aerosol optical depth at 550 nm           [-]
  real(kind=RKIND),dimension(:,:,:),allocatable::   taod5503d_p!aerosol optical depth at 550 nm                 [-]
+ real(kind=RKIND),dimension(:,:),allocatable  ::   taod5502d_sim_p!total aerosol optical depth at 550 nm           [-]
+ real(kind=RKIND),dimension(:,:,:),allocatable::   taod5503d_sim_p!aerosol optical depth at 550 nm                 [-]
 
  real(kind=RKIND),dimension(:,:,:,:),allocatable:: tauaer_p   !aerosol optical depth in RRTMG SW               [-]
  real(kind=RKIND),dimension(:,:,:,:),allocatable:: ssaaer_p   !aerosol single scatterin albedo in RRTMG SW     [-]
  real(kind=RKIND),dimension(:,:,:,:),allocatable:: asyaer_p   !aerosol asymmetry factor in RRTMG SW            [-]
+ real(kind=RKIND),dimension(:,:,:,:),allocatable:: tauaer_sw_p   !aerosol optical depth in RRTMG SW               [-]
+ real(kind=RKIND),dimension(:,:,:,:),allocatable:: tauaer_lw_p   !aerosol optical depth in RRTMG SW               [-]
+ real(kind=RKIND),dimension(:,:,:,:),allocatable:: ssaaer_sw_p   !aerosol single scatterin albedo in RRTMG SW     [-]
+ real(kind=RKIND),dimension(:,:,:,:),allocatable:: asyaer_sw_p   !aerosol asymmetry factor in RRTMG SW            [-]
 
 !=================================================================================================================
 !... variables and arrays related to parameterization of short-wave radiation:
@@ -874,12 +889,16 @@
     swcf_p,           &!shortwave cloud forcing at top-of-atmosphere                        [W m-2]
     swdnb_p,          &!all-sky downwelling shortwave flux at bottom-of-atmosphere          [J m-2]
     swdnbc_p,         &!clear-sky downwelling shortwave flux at bottom-of-atmosphere        [J m-2]
+    swdnbcln_p,       &!clean-sky downwelling shortwave flux at bottom-of-atmosphere        [J m-2]
     swdnt_p,          &!all-sky downwelling shortwave flux at top-of-atmosphere             [J m-2]
     swdntc_p,         &!clear-sky downwelling shortwave flux at top-of-atmosphere           [J m-2]
+    swdntcln_p,       &!clean-sky downwelling shortwave flux at top-of-atmosphere           [J m-2]
     swupb_p,          &!all-sky upwelling shortwave flux at bottom-of-atmosphere            [J m-2]
     swupbc_p,         &!clear-sky upwelling shortwave flux at bottom-of-atmosphere          [J m-2]
+    swupbcln_p,       &!clean-sky upwelling shortwave flux at bottom-of-atmosphere          [J m-2]
     swupt_p,          &!all-sky upwelling shortwave flux at top-of-atmosphere               [J m-2]
-    swuptc_p           !clear-sky upwelling shortwave flux at top-of-atmosphere             [J m-2]
+    swuptc_p,         &!clear-sky upwelling shortwave flux at top-of-atmosphere             [J m-2]
+    swuptcln_p         !clean-sky upwelling shortwave flux at top-of-atmosphere             [J m-2]
 
  real(kind=RKIND),dimension(:,:),allocatable:: &
     swvisdir_p,       &!visible direct downward flux                                        [W m-2]
@@ -895,12 +914,13 @@
  real(kind=RKIND),dimension(:,:,:),allocatable:: &
     swdnflx_p,        &!
     swdnflxc_p,       &!
+    swdnflxcln_p,     &!
     swupflx_p,        &!
-    swupflxc_p         !
+    swupflxc_p,       &!
+    swupflxcln_p       !
 
  real(kind=RKIND),dimension(:,:,:),allocatable:: &
     rthratensw_p       !uncoupled theta tendency due to shortwave radiation                 [K s-1]
-
 !=================================================================================================================
 !... variables and arrays related to parameterization of long-wave radiation:
 !=================================================================================================================
@@ -915,22 +935,29 @@
     lwcf_p,           &!longwave cloud forcing at top-of-atmosphere                         [W m-2]
     lwdnb_p,          &!all-sky downwelling longwave flux at bottom-of-atmosphere           [J m-2]
     lwdnbc_p,         &!clear-sky downwelling longwave flux at bottom-of-atmosphere         [J m-2]
+    lwdnbcln_p,       &!clean-sky downwelling longwave flux at bottom-of-atmosphere         [J m-2]
     lwdnt_p,          &!all-sky downwelling longwave flux at top-of-atmosphere              [J m-2]
     lwdntc_p,         &!clear-sky downwelling longwave flux at top-of-atmosphere            [J m-2]
+    lwdntcln_p,       &!clean-sky downwelling longwave flux at top-of-atmosphere            [J m-2]
     lwupb_p,          &!all-sky upwelling longwave flux at bottom-of-atmosphere             [J m-2]
     lwupbc_p,         &!clear-sky upwelling longwave flux at bottom-of-atmosphere           [J m-2]
+    lwupbcln_p,       &!clean-sky upwelling longwave flux at bottom-of-atmosphere           [J m-2]
     lwupt_p,          &!all-sky upwelling longwave flux at top-of-atmosphere                [J m-2]
     lwuptc_p,         &!clear-sky upwelling longwave flux at top-of-atmosphere              [J m-2]
+    lwuptcln_p,       &!clean-sky upwelling longwave flux at top-of-atmosphere              [J m-2]
     olrtoa_p           !outgoing longwave radiation at top-of-the-atmosphere                [W m-2]
 
   real(kind=RKIND),dimension(:,:,:),allocatable:: &
     lwdnflx_p,        &!
     lwdnflxc_p,       &!
+    lwdnflxcln_p,     &!
     lwupflx_p,        &!
-    lwupflxc_p         !
+    lwupflxc_p,       &!
+    lwupflxcln_p      !
 
  real(kind=RKIND),dimension(:,:,:),allocatable:: &
     rthratenlw_p,     &!uncoupled theta tendency due to longwave radiation                  [K s-1]
+    rthratenlwc_p,     &!uncoupled theta tendency due to clear-sky longwave radiation                  [K s-1]
     rrecloud_p,       &!effective radius for cloud water calculated in rrtmg_lwrad             [mu]
     rreice_p,         &!effective radius for cloud ice calculated in rrmtg_lwrad               [mu]
     rresnow_p         !effective radius for snow calculated in rrtmg_lwrad                    [mu]

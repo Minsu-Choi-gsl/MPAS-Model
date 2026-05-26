@@ -17,9 +17,16 @@
  use mpas_atmphys_vars
 
  use mpas_smoke_wrapper
+ use rad_data_mod, only : aero_rad_init
+
+ use mpas_dmpar
+ use mpas_geometry_utils
 
  implicit none
+
+
  private
+
  public:: allocate_smoke,     &
           deallocate_smoke,   &
           init_smoke,         &
@@ -40,21 +47,35 @@
  
  character(len=StrKIND),pointer :: config_smoke_scheme
  character(len=StrKIND),pointer :: config_dust_scheme
+ character(len=StrKIND),pointer :: config_pollen_scheme
  character(len=StrKIND),pointer :: config_anthro_scheme
+ character(len=StrKIND),pointer :: config_ssalt_scheme
+ character(len=StrKIND),pointer :: config_volc_scheme
+ character(len=StrKIND),pointer :: config_sna_scheme
  character(len=StrKIND),pointer :: config_rwc_scheme
-
  integer, pointer :: ebb_dcycle
  integer, pointer :: wetdep_ls_opt
+ ! Code has been added by Minsu Choi, CIRES/NOAA GSL
+ ! Now we are adding simple Mie calculation for smoke_fine particle
+ integer, pointer :: config_soa_scheme
  integer, pointer :: drydep_opt
+ integer, pointer :: config_mie_aod_opt
  integer, pointer :: plumerise_opt
  logical, pointer :: add_fire_heat_flux, add_fire_moist_flux
  integer, pointer :: bb_input_prevh
+ logical ,pointer :: calc_bb_emis_online
  integer:: i,k,j,nblocks
 
  call mpas_pool_get_config(configs,'config_smoke_scheme', config_smoke_scheme)
  call mpas_pool_get_config(configs,'config_dust_scheme', config_dust_scheme)
+ call mpas_pool_get_config(configs,'config_pollen_scheme',config_pollen_scheme)
  call mpas_pool_get_config(configs,'config_anthro_scheme',config_anthro_scheme)
+ call mpas_pool_get_config(configs,'config_ssalt_scheme',config_ssalt_scheme)
+ call mpas_pool_get_config(configs,'config_volc_scheme',config_volc_scheme)
+ call mpas_pool_get_config(configs,'config_sna_scheme',config_sna_scheme)
+ call mpas_pool_get_config(configs,'config_soa_scheme',config_soa_scheme)
  call mpas_pool_get_config(configs,'config_rwc_scheme',config_rwc_scheme)
+ call mpas_pool_get_config(configs,'calc_bb_emis_online',calc_bb_emis_online)
 
  call mpas_pool_get_config(configs,'ebb_dcycle', ebb_dcycle)
  call mpas_pool_get_config(configs,'plumerise_opt',plumerise_opt)
@@ -65,7 +86,6 @@
 
  call mpas_pool_get_config(configs,'wetdep_ls_opt',wetdep_ls_opt)
  call mpas_pool_get_config(configs,'drydep_opt',drydep_opt)
-
 
  if(.not.allocated(dx_p)        ) allocate(dx_p(ims:ime,jms:jme)                 )
  if(.not.allocated(area_p)      ) allocate(area_p(ims:ime,jms:jme)               )
@@ -109,6 +129,8 @@
  if(.not.allocated(vis_p)       ) allocate(vis_p(ims:ime,jms:jme)                )
  if(.not.allocated(aod550_p)    ) allocate(aod550_p(ims:ime,jms:jme)                )
  if(.not.allocated(aod3d_p))      allocate(aod3d_p(ims:ime,kms:kme,jms:jme))
+ if(.not.allocated(aod550_simple_p)    ) allocate(aod550_simple_p(ims:ime,jms:jme)                )
+ if(.not.allocated(aod3d_simple_p))   allocate(aod3d_simple_p(ims:ime,kms:kme,jms:jme))
 
  if ( config_smoke_scheme .ne. 'off' ) then
     if(.not.allocated(frp_out_p)   )         allocate(frp_out_p(ims:ime,jms:jme))
@@ -116,22 +138,28 @@
     if(.not.allocated(hwp_p)       )         allocate(hwp_p(ims:ime,jms:jme))
     if(.not.allocated(coef_bb_dc_p))         allocate(coef_bb_dc_p(ims:ime,jms:jme))
     if(.not.allocated(aod3d_smoke_p))        allocate(aod3d_smoke_p(ims:ime,kms:kme,jms:jme))
-    if (ebb_dcycle .eq. 1 ) then
-       if(.not.allocated(frp_in_p)    )         allocate(frp_in_p(ims:ime,jms:jme))
-       if(.not.allocated(fre_in_p)            )  allocate(fre_in_p(ims:ime,jms:jme))
-    else
+    if ( calc_bb_emis_online ) then
+       if(.not.allocated(ecoregion_ID_p)  )  allocate(ecoregion_ID_p(ims:ime,jms:jme))  !eco map 2d
+       if(.not.allocated(efs_smold_p)     )  allocate(efs_smold_p(ims:ime,jms:jme)) !EFs for smoldering
+       if(.not.allocated(efs_flam_p)      )  allocate(efs_flam_p(ims:ime,jms:jme)) !EFs for flaming
+       if(.not.allocated(efs_rsmold_p)    )  allocate(efs_rsmold_p(ims:ime,jms:jme)) !EFs for residual smoldering
+       if(.not.allocated(fire_ef_out_p)   )  allocate(fire_ef_out_p(ims:ime,jms:jme))
+    endif
+    if(.not.allocated(tauaer_sw_p))        allocate(tauaer_sw_p(ims:ime,kms:kme,jms:jme,1:14))
+    if(.not.allocated(tauaer_lw_p))        allocate(tauaer_lw_p(ims:ime,kms:kme,jms:jme,1:16))
+    if(.not.allocated(ssaaer_sw_p))        allocate(ssaaer_sw_p(ims:ime,kms:kme,jms:jme,1:14))
+    if(.not.allocated(asyaer_sw_p))        allocate(asyaer_sw_p(ims:ime,kms:kme,jms:jme,1:14))
+    if (ebb_dcycle .eq. 2 ) then
+! TODO -- is fmc_avg for ebb or calc emis?
+       if(.not.allocated(fmc_avg_p)       )  allocate(fmc_avg_p(ims:ime,jms:jme))  !should be always 2d
        if(.not.allocated(totprcp_prev24_p))  allocate(totprcp_prev24_p(ims:ime,jms:jme)) !should be always 2d
        if(.not.allocated(hwp_avg_p)       )  allocate(hwp_avg_p(ims:ime,jms:jme,nblocks))
        if(.not.allocated(frp_avg_p)       )  allocate(frp_avg_p(ims:ime,jms:jme,nblocks))
        if(.not.allocated(fre_avg_p)       )  allocate(fre_avg_p(ims:ime,jms:jme,nblocks))
-       if(.not.allocated(fire_end_hr_p)   )  allocate(fire_end_hr_p(ims:ime,jms:jme)) !should be always 2d
-       if(.not.allocated(fmc_avg_p)       )  allocate(fmc_avg_p(ims:ime,jms:jme))  !should be always 2d
-       if(.not.allocated(eco_id_p)        )  allocate(eco_id_p(ims:ime,jms:jme))  !eco map 2d
-       if(.not.allocated(efs_smold_p)     )  allocate(efs_smold_p(ims:ime,jms:jme)) !EFs for smoldering
-       if(.not.allocated(efs_flam_p)      )  allocate(efs_flam_p(ims:ime,jms:jme)) !EFs for flaming
-       if(.not.allocated(efs_rsmold_p)    )  allocate(efs_rsmold_p(ims:ime,jms:jme)) !EFs for residual smoldering
        if(.not.allocated(fire_end_hr_p)   )  allocate(fire_end_hr_p(ims:ime,jms:jme))
-       if(.not.allocated(fire_ef_out_p)   )  allocate(fire_ef_out_p(ims:ime,jms:jme))
+    else
+       if(.not.allocated(frp_in_p)    )         allocate(frp_in_p(ims:ime,jms:jme))
+       if(.not.allocated(fre_in_p)            )  allocate(fre_in_p(ims:ime,jms:jme))
     endif
     if (add_fire_heat_flux) then 
        if(.not.allocated(hfx_bb_p)           )  allocate(hfx_bb_p(ims:ime,jms:jme))
@@ -149,10 +177,8 @@
     if(.not.allocated(clayfrac_in_p))        allocate(clayfrac_in_p(ims:ime,jms:jme))
     if(.not.allocated(sandfrac_in_p))        allocate(sandfrac_in_p(ims:ime,jms:jme))
     if(.not.allocated(uthres_in_p))          allocate(uthres_in_p(ims:ime,jms:jme))
-    if(.not.allocated(uthres_sg_in_p))       allocate(uthres_sg_in_p(ims:ime,jms:jme))
-    if(.not.allocated(albedo_drag_p))        allocate(albedo_drag_p(ims:ime,jms:jme))
-    if(.not.allocated(sep_in_p))             allocate(sep_in_p(ims:ime,jms:jme))
-    if(.not.allocated(feff_p))               allocate(feff_p(ims:ime,jms:jme))
+    if(.not.allocated(rdrag_p))              allocate(rdrag_p(ims:ime,jms:jme))
+    if(.not.allocated(ssm_in_p))             allocate(ssm_in_p(ims:ime,jms:jme))
  endif
 
  if ( wetdep_ls_opt .ne. 0 ) then
@@ -167,30 +193,69 @@
  if(.not.allocated(chem_p))               allocate(chem_p(ims:ime,kms:kme,jms:jme,1:num_chem))
  if(.not.allocated(PM2_5_p))              allocate(PM2_5_p(ims:ime,kms:kme,jms:jme))
  if(.not.allocated(PM10_p))               allocate(PM10_p(ims:ime,kms:kme,jms:jme))
+
+ if (config_soa_scheme .ge. 1) then
+    if(.not.allocated(PM2_5_SOA_p))          allocate(PM2_5_SOA_p(ims:ime,kms:kme,jms:jme))
+ endif
+ if (config_soa_scheme .ge. 2) then
+    if(.not.allocated(PM2_5_ANT_SOA_p))      allocate(PM2_5_ANT_SOA_p(ims:ime,kms:kme,jms:jme))
+    if(.not.allocated(PM2_5_SMOKE_SOA_p))    allocate(PM2_5_SMOKE_SOA_p(ims:ime,kms:kme,jms:jme))
+    if(.not.allocated(PM2_5_SOA_p))          allocate(PM2_5_SOA_p(ims:ime,kms:kme,jms:jme))
+ endif         
  
- if ( num_e_bb_in .gt. 0 .and. config_smoke_scheme .ne. 'off' ) then
-    if(.not.allocated(e_bb_in_p))           allocate(e_bb_in_p (ims:ime,1:kwildfire,jms:jme,1:num_e_bb_in) )
+ if ( num_e_ant_pt_in .gt. 0 ) then
+    if(.not.allocated(e_ant_pt_in_p))   allocate(e_ant_pt_in_p(25,1:num_anthro_pt,1:num_e_ant_pt_in))
+ endif
+ if ( num_e_ant_stack_groups_in .gt. 0 ) then
+    if(.not.allocated(e_ant_stack_groups_in_p)) allocate(e_ant_stack_groups_in_p(1:num_anthro_pt,1:num_e_ant_stack_groups_in))
  endif
  if ( num_e_ant_in .gt. 0 .and. config_anthro_scheme .ne. 'off' ) then
     if(.not.allocated(e_ant_in_p))          allocate(e_ant_in_p(ims:ime,1:kanthro,jms:jme,1:num_e_ant_in))
  endif
- if ( num_e_bb_out .gt. 0 .and. config_smoke_scheme .ne. 'off' ) then
-    if(.not.allocated(e_bb_out_p))          allocate(e_bb_out_p  (ims:ime,kms:kme,jms:jme,1:num_e_bb_out)  )
- endif
- if ( num_e_dust_out .gt. 0 .and. config_dust_scheme .ne. 'off' ) then
-    if(.not.allocated(e_dust_out_p))        allocate(e_dust_out_p(ims:ime,kms:kme,jms:jme,1:num_e_dust_out))
- endif
- if ( num_e_ant_out .gt. 0 .and. config_anthro_scheme .ne. 'off' ) then
+ if ( num_e_ant_out .gt. 0 ) then
     if(.not.allocated(e_ant_out_p))         allocate(e_ant_out_p (ims:ime,kms:kme,jms:jme,1:num_e_ant_out) )
  endif
- if ( config_rwc_scheme .ne. 'off' ) then
-    if(.not.allocated(RWC_denominator_p))               allocate(RWC_denominator_p(ims:ime,jms:jme))
-    if(.not.allocated(RWC_annual_sum_p))                allocate(RWC_annual_sum_p(ims:ime,1:kreswoodcomb,jms:jme))
-    if(.not.allocated(RWC_annual_sum_smoke_fine_p))     allocate(RWC_annual_sum_smoke_fine_p(ims:ime,1:kreswoodcomb,jms:jme))
-    if(.not.allocated(RWC_annual_sum_smoke_coarse_p))   allocate(RWC_annual_sum_smoke_coarse_p(ims:ime,1:kreswoodcomb,jms:jme))
-    if(.not.allocated(RWC_annual_sum_unspc_fine_p))     allocate(RWC_annual_sum_unspc_fine_p(ims:ime,1:kreswoodcomb,jms:jme))
-    if(.not.allocated(RWC_annual_sum_unspc_coarse_p))   allocate(RWC_annual_sum_unspc_coarse_p(ims:ime,1:kreswoodcomb,jms:jme))
+ if ( num_e_bb_in .gt. 0 ) then
+    if(.not.allocated(e_bb_in_p))           allocate(e_bb_in_p (ims:ime,1:kwildfire,jms:jme,1:num_e_bb_in) )
  endif
+ if ( num_e_bb_out .gt. 0 ) then
+    if(.not.allocated(e_bb_out_p))          allocate(e_bb_out_p  (ims:ime,kms:kme,jms:jme,1:num_e_bb_out)  )
+ endif
+ if ( num_e_bio_in .gt. 0 ) then
+    if(.not.allocated(e_bio_in_p))          allocate(e_bio_in_p(ims:ime,1:kbiogenic ,jms:jme,1:num_e_bio_in))
+ endif
+ if ( num_e_bio_out .gt. 0 ) then
+    if(.not.allocated(e_bio_out_p))         allocate(e_bio_out_p (ims:ime,kms:kme,jms:jme,1:num_e_bio_out) )
+ endif
+ if ( num_e_dust_out .gt. 0 ) then
+    if(.not.allocated(e_dust_out_p))        allocate(e_dust_out_p(ims:ime,kms:kme,jms:jme,1:num_e_dust_out))
+ endif
+ if ( num_e_vol_in .gt. 0 ) then
+    if(.not.allocated(e_vol_in_p))          allocate(e_vol_in_p(ims:ime,1:kvolcanic ,jms:jme,1:num_e_vol_in))
+ endif
+ if ( num_e_vol_out .gt. 0 ) then
+    if(.not.allocated(e_vol_out_p))         allocate(e_vol_out_p (ims:ime,kms:kme,jms:jme,1:num_e_vol_out) )
+ endif
+ if ( num_e_ss_out .gt. 0 ) then
+    if(.not.allocated(e_ss_out_p))          allocate(e_ss_out_p  (ims:ime,kms:kme,jms:jme,1:num_e_ss_out)  )
+ endif
+
+ if (config_sna_scheme .ne. 'off' ) then
+    if(.not.allocated(nifa_p))    allocate(nifa_p(ims:ime,kms:kme,jms:jme))
+    if(.not.allocated(nwfa_p))    allocate(nwfa_p(ims:ime,kms:kme,jms:jme))
+    if(.not.allocated(hno3_bkgd_p)) allocate(hno3_bkgd_p(ims:ime,kms:kme,jms:jme))
+ endif
+
+ if ( config_rwc_scheme .ne. 'off' ) then
+      if(.not.allocated(RWC_denominator_p))               allocate(RWC_denominator_p(ims:ime,jms:jme))
+      if(.not.allocated(RWC_annual_sum_p))                allocate(RWC_annual_sum_p(ims:ime,jms:jme))
+      if(.not.allocated(RWC_annual_sum_smoke_fine_p))     allocate(RWC_annual_sum_smoke_fine_p(ims:ime,jms:jme))
+      if(.not.allocated(RWC_annual_sum_smoke_coarse_p))   allocate(RWC_annual_sum_smoke_coarse_p(ims:ime,jms:jme))
+      if(.not.allocated(RWC_annual_sum_unspc_fine_p))     allocate(RWC_annual_sum_unspc_fine_p(ims:ime,jms:jme))
+      if(.not.allocated(RWC_annual_sum_unspc_coarse_p))   allocate(RWC_annual_sum_unspc_coarse_p(ims:ime,jms:jme))
+      if(.not.allocated(max_rwc_plume_p))                 allocate(max_rwc_plume_p(ims:ime,jms:jme))
+ endif
+
 
  end subroutine allocate_smoke
 
@@ -239,6 +304,8 @@
 
  if(allocated(vis_p)          ) deallocate(vis_p          )
 
+ if(allocated(nifa_p)         ) deallocate(nifa_p)
+ if(allocated(nwfa_p)         ) deallocate(nwfa_p)
  if(allocated(frp_in_p)       ) deallocate(frp_in_p       )
  if(allocated(fre_in_p)       ) deallocate(fre_in_p       )
 
@@ -250,20 +317,24 @@
  if(allocated(fre_avg_p)      ) deallocate(fre_avg_p      )
  if(allocated(fire_end_hr_p)  ) deallocate(fire_end_hr_p  )
  if(allocated(fmc_avg_p)      ) deallocate(fmc_avg_p      )
- if(allocated(eco_id_p)       ) deallocate(eco_id_p       )
+ if(allocated(ecoregion_ID_p) ) deallocate(ecoregion_ID_p )
  if(allocated(efs_smold_p)    ) deallocate(efs_smold_p    )
  if(allocated(efs_flam_p)     ) deallocate(efs_flam_p     )
  if(allocated(efs_rsmold_p)   ) deallocate(efs_rsmold_p   )
  if(allocated(fire_ef_out_p)  ) deallocate(fire_ef_out_p)
  if(allocated(totprcp_prev24_p) )     deallocate(totprcp_prev24_p )
 
+ if(allocated(RWC_denominator_p))   deallocate(RWC_denominator_p)
+ if(allocated(RWC_annual_sum_p))    deallocate(RWC_annual_sum_p)
+ if(allocated(RWC_annual_sum_smoke_fine_p))    deallocate(RWC_annual_sum_smoke_fine_p)
+ if(allocated(RWC_annual_sum_smoke_coarse_p))    deallocate(RWC_annual_sum_smoke_coarse_p)
+ if(allocated(RWC_annual_sum_unspc_fine_p))    deallocate(RWC_annual_sum_unspc_fine_p)
+ if(allocated(RWC_annual_sum_unspc_coarse_p))    deallocate(RWC_annual_sum_unspc_coarse_p)
  if(allocated(clayfrac_in_p)    )     deallocate(clayfrac_in_p    )
  if(allocated(sandfrac_in_p)    )     deallocate(sandfrac_in_p    )
  if(allocated(uthres_in_p)      )     deallocate(uthres_in_p      )
- if(allocated(uthres_sg_in_p)   )     deallocate(uthres_sg_in_p   )
- if(allocated(albedo_drag_p)    )     deallocate(albedo_drag_p    )
- if(allocated(feff_p)           )     deallocate(feff_p           )
- if(allocated(sep_in_p)         )     deallocate(sep_in_p         )
+ if(allocated(rdrag_p)          )     deallocate(rdrag_p    )
+ if(allocated(ssm_in_p)         )     deallocate(ssm_in_p         )
 
  if(allocated(ddvel_p)          )     deallocate(ddvel_p          )
  if(allocated(wetdep_resolved_p))     deallocate(wetdep_resolved_p)
@@ -272,23 +343,38 @@
 
  if(allocated(chem_p)       )         deallocate(chem_p       )
  if(allocated(PM2_5_p)      )         deallocate(PM2_5_p      )
+ if(allocated(PM2_5_SOA_p)  )         deallocate(PM2_5_SOA_p  )
+ if(allocated(PM2_5_SMOKE_SOA_p))     deallocate(PM2_5_SMOKE_SOA_p)
+ if(allocated(PM2_5_ANT_SOA_p)  )     deallocate(PM2_5_ANT_SOA_p )
  if(allocated(PM10_p)       )         deallocate(PM10_p       )
  if(allocated(aod550_p)     )         deallocate(aod550_p     )
+ if(allocated(aod550_simple_p))       deallocate(aod550_simple_p)
  if(allocated(aod3d_smoke_p))         deallocate(aod3d_smoke_p)
+ if(allocated(tauaer_sw_p) )          deallocate(tauaer_sw_p  )
+ if(allocated(tauaer_lw_p) )          deallocate(tauaer_lw_p  )
+ if(allocated(ssaaer_sw_p) )          deallocate(ssaaer_sw_p  )
+ if(allocated(asyaer_sw_p) )          deallocate(asyaer_sw_p  )
  if(allocated(aod3d_p)      )         deallocate(aod3d_p      )
+ if(allocated(aod3d_simple_p))        deallocate(aod3d_simple_p)
 
- if(allocated(e_bb_in_p)    )         deallocate(e_bb_in_p    )
- if(allocated(e_ant_in_p)   )         deallocate(e_ant_in_p   )
-
+ if(allocated(e_ant_in_p))            deallocate(e_ant_in_p)
+ if(allocated(e_bb_in_p)    )         deallocate(e_bb_in_p )
+ if(allocated(e_bio_in_p))            deallocate(e_bio_in_p)
+ if(allocated(e_vol_in_p))            deallocate(e_vol_in_p)
+ if(allocated(e_ant_pt_in_p))      deallocate(e_ant_pt_in_p)
+ if(allocated(e_ant_stack_groups_in_p)) deallocate(e_ant_stack_groups_in_p)
+ if(allocated(e_ant_out_p))           deallocate(e_ant_out_p)
  if(allocated(e_bb_out_p)   )         deallocate(e_bb_out_p   )
+ if(allocated(e_bio_out_p))           deallocate(e_bio_out_p)
  if(allocated(e_dust_out_p) )         deallocate(e_dust_out_p )
- if(allocated(e_ant_out_p)  )         deallocate(e_ant_out_p  )
+ if(allocated(e_ss_out_p))            deallocate(e_ss_out_p)
+ if(allocated(e_vol_out_p))           deallocate(e_vol_out_p)
  
 !-----------------------------------------------------------------------------------------------------------------
 
  end subroutine deallocate_smoke
 
- !=================================================================================================================
+!=================================================================================================================
  subroutine smoke_from_MPAS(dt_dyn, time_lev, emission_input, state, configs,  &
                             mesh,sfc_input, diag_physics, tend_physics, its, ite       )
 !=================================================================================================================
@@ -306,6 +392,7 @@
       real(kind=RKIND),intent(in)    :: dt_dyn
      
       !local pointers:
+      integer,pointer                            :: index_nifa, index_nwfa
       integer,dimension(:),pointer               :: ktop_deep
       real(kind=RKIND),dimension(:),pointer      :: meshDensity
       real(kind=RKIND),dimension(:),pointer      :: xland
@@ -323,21 +410,26 @@
       real(kind=RKIND),dimension(:,:),pointer    :: zgrid
       real(kind=RKIND),dimension(:,:),pointer    :: qc_bl, qi_bl
       real(kind=RKIND),dimension(:,:),pointer    :: wetdep_resolved, drydep_flux
+      real(kind=RKIND),dimension(:,:),pointer    :: nifa,nwfa  ! already made avaialbe in forallpysics/interface
+      real(kind=RKIND),dimension(:,:),pointer    :: hno3_bkgd
       real(kind=RKIND),dimension(:),pointer      :: frp_in, frp_out, fre_in, fre_out, &
                                                     hwp, coef_bb_dc, fire_end_hr, fire_ef_out
       real(kind=RKIND),dimension(:,:),pointer    :: totprcp_prev24, hwp_prev24, frp_prev24, fre_prev24, fmc_prev24
       real(kind=RKIND),dimension(:),pointer      :: efs_smold,efs_flam, efs_rsmold !JR eco regiona nd EF map
-      integer,dimension(:),pointer               :: eco_id
+      integer,dimension(:),pointer               :: ecoregion_ID
       real(kind=RKIND),dimension(:),pointer      :: hfx_bb, qfx_bb, frac_grid_burned
-      integer,dimension(:),pointer               :: min_bb_plume, max_bb_plume
-      real(kind=RKIND),dimension(:),pointer      :: sandfrac_in, clayfrac_in, uthres_in, uthres_sg_in, &
-                                                    sep_in, albedo_drag,feff
+      integer,dimension(:),pointer               :: min_bb_plume, max_bb_plume, max_rwc_plume
+      real(kind=RKIND),dimension(:),pointer      :: sandfrac_in, clayfrac_in, uthres_in, &
+                                                    ssm_in, rdrag
       real(kind=RKIND),dimension(:),pointer      :: RWC_denominator
-      real(kind=RKIND),dimension(:,:), pointer   :: RWC_annual_sum, RWC_annual_sum_smoke_fine, &
+      real(kind=RKIND),dimension(:), pointer   :: RWC_annual_sum, RWC_annual_sum_smoke_fine, &
                                                     RWC_annual_sum_smoke_coarse,RWC_annual_sum_unspc_fine, &
                                                     RWC_annual_sum_unspc_coarse
-      real(kind=RKIND),dimension(:,:,:),pointer  :: e_bb_in, e_ant_in
-      real(kind=RKIND),dimension(:,:,:),pointer  :: e_bb_out, e_dust_out, e_ant_out
+      real(kind=RKIND),dimension(:,:,:),pointer  :: e_ant_in, e_bb_in, e_bio_in, e_vol_in
+      real(kind=RKIND),dimension(:,:,:),pointer  :: e_ant_pt_in
+      real(kind=RKIND),dimension(:,:),pointer    :: e_ant_stack_groups_in
+      real(kind=RKIND),dimension(:,:,:),pointer  :: e_ant_out, e_bb_out, e_bio_out, &
+                                                    e_vol_out, e_dust_out, e_ss_out
       integer,dimension(:),pointer               :: isltyp,ivgtyp,kpbl
      
       integer,pointer                            :: chemistry_start,chemistry_end
@@ -345,14 +437,21 @@
       integer,pointer                            :: ebb_dcycle
       character(len=StrKIND),pointer :: config_smoke_scheme
       character(len=StrKIND),pointer :: config_dust_scheme
+      character(len=StrKIND),pointer :: config_pollen_scheme
       character(len=StrKIND),pointer :: config_anthro_scheme
+      character(len=StrKIND),pointer :: config_anthro_pt_scheme
+      character(len=StrKIND),pointer :: config_ssalt_scheme
+      character(len=StrKIND),pointer :: config_volc_scheme
+      character(len=StrKIND),pointer :: config_sna_scheme
       character(len=StrKIND),pointer :: config_rwc_scheme
       character(len=StrKIND),pointer :: config_convection_scheme
+      integer, pointer :: config_soa_scheme
       integer, pointer :: wetdep_ls_opt
       integer, pointer :: drydep_opt
       integer, pointer :: plumerise_opt
       logical, pointer :: add_fire_heat_flux, add_fire_moist_flux
-     
+      logical, pointer :: calc_bb_emis_online
+      
       real(kind=RKIND),dimension(:,:,:),pointer :: scalars
       real(kind=RKIND),dimension(:,:,:),pointer :: chem
       integer, pointer :: bb_input_prevh !JR
@@ -368,17 +467,24 @@
 
       call mpas_pool_get_config(configs,'config_smoke_scheme', config_smoke_scheme)
       call mpas_pool_get_config(configs,'config_dust_scheme', config_dust_scheme)
-      call mpas_pool_get_config(configs,'config_anthro_scheme', config_anthro_scheme)
-      call mpas_pool_get_config(configs,'config_rwc_scheme',config_rwc_scheme)
+      call mpas_pool_get_config(configs,'config_pollen_scheme',config_pollen_scheme)
+      call mpas_pool_get_config(configs,'config_anthro_scheme',config_anthro_scheme)
+      call mpas_pool_get_config(configs,'config_anthro_pt_scheme',config_anthro_pt_scheme)
+      call mpas_pool_get_config(configs,'config_ssalt_scheme',config_ssalt_scheme)
+      call mpas_pool_get_config(configs,'config_volc_scheme',config_volc_scheme)
+      call mpas_pool_get_config(configs,'config_sna_scheme',config_sna_scheme)
+      call mpas_pool_get_config(configs,'config_soa_scheme',config_soa_scheme)
 
       call mpas_pool_get_config(configs,'wetdep_ls_opt',wetdep_ls_opt)
       call mpas_pool_get_config(configs,'drydep_opt',drydep_opt)
       call mpas_pool_get_config(configs,'config_convection_scheme',config_convection_scheme)
 
+      call mpas_pool_get_config(configs,'config_rwc_scheme',config_rwc_scheme)
       call mpas_pool_get_config(configs,'plumerise_opt',plumerise_opt)
       call mpas_pool_get_config(configs,'add_fire_heat_flux',add_fire_heat_flux)
       call mpas_pool_get_config(configs,'add_fire_moist_flux',add_fire_moist_flux)
       call mpas_pool_get_config(configs,'ebb_dcycle', ebb_dcycle)
+      call mpas_pool_get_config(configs,'calc_bb_emis_online',calc_bb_emis_online)
       if (ebb_dcycle .eq. 2) then
         nblocks = 24 / bb_input_prevh
       endif
@@ -424,32 +530,53 @@
       if ( drydep_opt .ne. 0 ) then
          call mpas_pool_get_array(diag_physics,'drydep_flux',drydep_flux)
       endif
+      if ( config_sna_scheme .ne. 'off' ) then ! .or. config_ind_fdb .ne. 'off'
+         !nullify(nifa)
+         !nullify(nwfa)
+         call mpas_pool_get_dimension(state,'index_nifa',index_nifa)
+         call mpas_pool_get_dimension(state,'index_nwfa',index_nwfa)
+         nifa => scalars(index_nifa,:,:)
+         nwfa => scalars(index_nwfa,:,:)
+         call mpas_pool_get_array(diag_physics,'hno3_bkgd',hno3_bkgd)
+      endif
 
       if ( config_dust_scheme .ne. 'off' ) then
          call mpas_pool_get_array(diag_physics, 'clayfrac_in',clayfrac_in)
          call mpas_pool_get_array(diag_physics, 'sandfrac_in',sandfrac_in)
          call mpas_pool_get_array(diag_physics, 'uthres_in',uthres_in)
-         call mpas_pool_get_array(diag_physics, 'uthres_sg_in',uthres_sg_in)
-         call mpas_pool_get_array(diag_physics, 'albedo_drag',albedo_drag) ! these have been updated to select
-         call mpas_pool_get_array(diag_physics, 'feff',feff)               ! the correct month
-         call mpas_pool_get_array(diag_physics, 'sep_in',sep_in)
+         call mpas_pool_get_array(diag_physics, 'rdrag',rdrag) ! these have been updated to select
+         call mpas_pool_get_array(diag_physics, 'ssm_in',ssm_in)
       endif
 
-      if (config_smoke_scheme .ne. 'off' .and. num_e_bb_in .gt. 0 ) then
-         call mpas_pool_get_array(emission_input, 'e_bb_in', e_bb_in)
-      endif
 
+      if (config_anthro_pt_scheme .ne. 'off' ) then
+         if (num_e_ant_pt_in .gt. 0 ) then
+            call mpas_pool_get_array(emission_input, 'e_ant_pt_in',e_ant_pt_in)
+         endif
+         if (num_e_ant_stack_groups_in .gt. 0 ) then
+            call mpas_pool_get_array(emission_input, 'e_ant_stack_groups_in',e_ant_stack_groups_in)
+         endif
+      endif
       if (config_anthro_scheme .ne. 'off' .and. num_e_ant_in .gt. 0 ) then
          call mpas_pool_get_array(emission_input, 'e_ant_in', e_ant_in)
       endif
-
-       if (config_rwc_scheme .ne. 'off' ) then
+      if (config_smoke_scheme .ne. 'off' .and. num_e_bb_in .gt. 0 ) then
+         call mpas_pool_get_array(emission_input, 'e_bb_in', e_bb_in)
+      endif
+      if (config_pollen_scheme .ne. 'off' .and. num_e_bio_in .gt. 0 ) then
+         call mpas_pool_get_array(emission_input, 'e_bio_in', e_bio_in)
+      endif
+      if (config_volc_scheme .ne. 'off' .and. num_e_vol_in .gt. 0 ) then
+         call mpas_pool_get_array(emission_input, 'e_vol_in', e_vol_in)
+      endif
+      if (config_rwc_scheme .ne. 'off' ) then
          call mpas_pool_get_array(diag_physics,'RWC_denominator',RWC_denominator)
          call mpas_pool_get_array(diag_physics,'RWC_annual_sum',RWC_annual_sum)
          call mpas_pool_get_array(diag_physics,'RWC_annual_sum_smoke_fine',RWC_annual_sum_smoke_fine)
          call mpas_pool_get_array(diag_physics,'RWC_annual_sum_smoke_coarse',RWC_annual_sum_smoke_coarse)
          call mpas_pool_get_array(diag_physics,'RWC_annual_sum_unspc_fine',RWC_annual_sum_unspc_fine)
          call mpas_pool_get_array(diag_physics,'RWC_annual_sum_unspc_coarse',RWC_annual_sum_unspc_coarse)
+         call mpas_pool_get_array(diag_physics,'max_rwc_plume',max_rwc_plume)
       endif
 
       if (config_smoke_scheme .ne. 'off' ) then
@@ -457,21 +584,23 @@
          call mpas_pool_get_array(diag_physics,'fre_out',fre_out)
          call mpas_pool_get_array(diag_physics,'hwp',hwp)
          call mpas_pool_get_array(diag_physics,'coef_bb_dc',coef_bb_dc)
-         if ( ebb_dcycle .eq. 1 ) then
-            call mpas_pool_get_array(diag_physics,'frp_in',frp_in)
-            call mpas_pool_get_array(diag_physics,'fre_in',fre_in)
-         else
+         if ( calc_bb_emis_online ) then
+            call mpas_pool_get_array(diag_physics,'ecoregion_ID',ecoregion_ID)
+            call mpas_pool_get_array(diag_physics,'efs_smold',efs_smold)
+            call mpas_pool_get_array(diag_physics,'efs_flam',efs_flam)
+            call mpas_pool_get_array(diag_physics,'efs_rsmold',efs_rsmold)
+            call mpas_pool_get_array(diag_physics,'fire_ef_out',fire_ef_out)
+         endif
+         if ( ebb_dcycle .eq. 2 ) then
+            call mpas_pool_get_array(diag_physics,'fmc_prev24',fmc_prev24)
             call mpas_pool_get_array(diag_physics,'totprcp_prev24',totprcp_prev24)
             call mpas_pool_get_array(diag_physics,'hwp_prev24',hwp_prev24)
             call mpas_pool_get_array(diag_physics,'frp_prev24',frp_prev24)
             call mpas_pool_get_array(diag_physics,'fre_prev24',fre_prev24)
             call mpas_pool_get_array(diag_physics,'fire_end_hr',fire_end_hr)
-            call mpas_pool_get_array(diag_physics,'fmc_prev24',fmc_prev24)
-            call mpas_pool_get_array(diag_physics,'eco_id',eco_id)
-            call mpas_pool_get_array(diag_physics,'efs_smold',efs_smold)
-            call mpas_pool_get_array(diag_physics,'efs_flam',efs_flam)
-            call mpas_pool_get_array(diag_physics,'efs_rsmold',efs_rsmold)
-            call mpas_pool_get_array(diag_physics,'fire_ef_out',fire_ef_out)
+         else
+            call mpas_pool_get_array(diag_physics,'frp_in',frp_in)
+            call mpas_pool_get_array(diag_physics,'fre_in',fre_in)
          endif
          if ( plumerise_opt .gt. 0 ) then
             call mpas_pool_get_array(diag_physics,'min_bb_plume',min_bb_plume)
@@ -485,14 +614,23 @@
             call mpas_pool_get_array(diag_physics,'qfx_bb',qfx_bb)
          endif
       endif
+      if ( num_e_ant_out .gt. 0 ) then
+         call mpas_pool_get_array(diag_physics, 'e_ant_out',e_ant_out)
+      endif
       if ( num_e_bb_out .gt. 0 ) then
          call mpas_pool_get_array(diag_physics, 'e_bb_out',e_bb_out)
+      endif
+      if ( num_e_bio_out .gt. 0 ) then
+         call mpas_pool_get_array(diag_physics, 'e_bio_out',e_bio_out)
       endif
       if ( num_e_dust_out .gt. 0 ) then
          call mpas_pool_get_array(diag_physics, 'e_dust_out',e_dust_out)
       endif
-      if ( num_e_ant_out .gt. 0 .and. config_anthro_scheme .ne. 'off') then
-         call mpas_pool_get_array(diag_physics, 'e_ant_out',e_ant_out)
+      if ( num_e_ss_out .gt. 0 ) then
+         call mpas_pool_get_array(diag_physics, 'e_ss_out',e_ss_out)
+      endif
+      if ( num_e_vol_out .gt. 0 ) then
+         call mpas_pool_get_array(diag_physics, 'e_vol_out',e_vol_out)
       endif
      
       chem => scalars(chemistry_start:chemistry_end,:,:)
@@ -518,23 +656,23 @@
          qcbl_p(i,k,j)     = qc_bl(k,i)
          qibl_p(i,k,j)     = qi_bl(k,i)
          aod3d_p(i,k,j)    = 0._RKIND
+         aod3d_simple_p(i,k,j)    = 0._RKIND
       enddo
       enddo
       enddo
-     
-!
-     if ( num_e_bb_in .gt. 0 ) then 
-      do j = jts, jte
-      do k = 1, kwildfire
-      do i = its, ite
-      do n = 1, num_e_bb_in
-         e_bb_in_p(i,k,j,n) = e_bb_in(n,k,i)
-      enddo
-      enddo
-      enddo
-      enddo
-     endif
-!
+! Thompson/Nwifa 
+      if ( config_sna_scheme .ne. 'off' ) then ! .or. config_indfdb
+       do j = jts, jte
+       do k = kts, kte
+       do i = its, ite
+              nifa_p(i,k,j)   = nifa(k,i)
+              nwfa_p(i,k,j)   = nwfa(k,i)
+              hno3_bkgd_p(i,k,j) = hno3_bkgd(k,i)
+       enddo
+       enddo
+       enddo
+      endif
+
       if ( num_e_ant_in .gt. 0 .and. config_anthro_scheme .ne. 'off') then
        do n = 1, num_e_ant_in
        do j = jts, jte
@@ -545,8 +683,58 @@
        enddo
        enddo
        enddo
+      endif   
+ 
+      if ( num_e_ant_pt_in .gt. 0 .and. config_anthro_pt_scheme .ne. 'off') then
+ 
+       do n=1,num_e_ant_pt_in
+       do i=1,num_anthro_pt
+          e_ant_stack_groups_in_p(i,n) = e_ant_stack_groups_in(n,i)
+       do j=1,25
+          e_ant_pt_in_p(j,i,n) = e_ant_pt_in(n,i,j)
+       enddo
+       enddo
+       enddo
+      endif
+ 
+!
+     if ( num_e_bb_in .gt. 0 .and. config_smoke_scheme .ne. 'off') then 
+      do n = 1, num_e_bb_in
+      do j = jts, jte
+      do k = 1, kwildfire
+      do i = its, ite
+         e_bb_in_p(i,k,j,n) = e_bb_in(n,k,i)
+      enddo
+      enddo
+      enddo
+      enddo
+     endif
+!
+!
+      if ( num_e_bio_in .gt. 0 ) then
+       do n = 1, num_e_bio_in
+       do j = jts, jte
+       do k = 1, kbiogenic
+       do i = its, ite
+          e_bio_in_p(i,k,j,n) = e_bio_in(n,k,i)
+       enddo
+       enddo
+       enddo
+       enddo
       endif
 
+      if ( num_e_vol_in .gt. 0 ) then
+        do n = 1, num_e_vol_in
+        do j = jts, jte
+        do k = 1, kvolcanic
+        do i = its, ite
+           e_vol_in_p(i,k,j,n) = e_vol_in(n,k,i)
+        enddo
+        enddo
+        enddo
+        enddo
+      endif
+!
       do j = jts,jte
       do n = 1,num_soils
       do i = its,ite
@@ -566,16 +754,17 @@
           fre_out_p(i,j) = fre_out(i)
           hwp_p(i,j)     = hwp(i)
           coef_bb_dc_p(i,j) = coef_bb_dc(i)
-          if ( ebb_dcycle .eq. 1 ) then
+          if (calc_bb_emis_online) then
+             ecoregion_ID_p     (i,j)  = ecoregion_ID(i)
+             efs_smold_p  (i,j)  = efs_smold(i)
+             efs_flam_p   (i,j)  = efs_flam(i)
+             efs_rsmold_p (i,j)  = efs_rsmold(i)
+! TODO, these need to be utilized
+             fire_ef_out_p(i,j)  = fire_ef_out(i)
+          endif
+          if ( ebb_dcycle .eq. 1 .or. ebb_dcycle .eq. -1 ) then
              frp_in_p(i,j)  = frp_in(i)
              fre_in_p(i,j)  = fre_in(i)
-          else
-          eco_id_p     (i,j)  = eco_id(i)
-          efs_smold_p  (i,j)  = efs_smold(i)
-          efs_flam_p   (i,j)  = efs_flam(i)
-          efs_rsmold_p (i,j)  = efs_rsmold(i)
-          fire_ef_out_p(i,j)  = fire_ef_out(i)
-          fire_end_hr_p(i,j)  = fire_end_hr(i)
           endif
           if ( plumerise_opt .gt. 0 ) then
              min_bb_plume_p(i,j) = 0
@@ -594,22 +783,19 @@
       !
       if ( config_rwc_scheme .ne. 'off' ) then
         do j = jts, jte
-        do k = 1,kreswoodcomb
         do i = its, ite
-            RWC_annual_sum_p(i,k,j)  = RWC_annual_sum(k,i)
-            RWC_annual_sum_smoke_fine_p(i,k,j)    = RWC_annual_sum_smoke_fine(k,i)
-            RWC_annual_sum_smoke_coarse_p(i,k,j)  = RWC_annual_sum_smoke_coarse(k,i)
-            RWC_annual_sum_unspc_fine_p(i,k,j)    = RWC_annual_sum_unspc_fine(k,i)
-            RWC_annual_sum_unspc_coarse_p(i,k,j)  = RWC_annual_sum_unspc_coarse(k,i)
-        enddo
-        enddo
-        enddo
-        do j = jts, jte
-        do i = its, ite
+            RWC_annual_sum_p(i,j)  = RWC_annual_sum(i)
+            RWC_annual_sum_smoke_fine_p(i,j)    = RWC_annual_sum_smoke_fine(i)
+            RWC_annual_sum_smoke_coarse_p(i,j)  = RWC_annual_sum_smoke_coarse(i)
+            RWC_annual_sum_unspc_fine_p(i,j)    = RWC_annual_sum_unspc_fine(i)
+            RWC_annual_sum_unspc_coarse_p(i,j)  = RWC_annual_sum_unspc_coarse(i)
             RWC_denominator_p(i,j) = RWC_denominator(i)
+            max_rwc_plume_p(i,j) = 0
         enddo
         enddo
+      
       endif
+      !
 
       if ( config_smoke_scheme .ne. 'off' .and. ebb_dcycle .eq. 2 ) then
       do blk = 1, nblocks
@@ -672,6 +858,7 @@
          coszr_p(i,j)   = coszr(i)
      ! Met
          kpbl_p(i,j)    = kpbl(i)
+         vis_p(i,j)     = 0._RKIND
          if ( config_convection_scheme .eq. 'cu_grell_freitas_li' ) then
             ktop_deep_p(i,j)=ktop_deep(i)
          else
@@ -704,10 +891,8 @@
             sandfrac_in_p(i,j)    = sandfrac_in(i)
             clayfrac_in_p(i,j)    = clayfrac_in(i)
             uthres_in_p(i,j)      = uthres_in(i)
-            uthres_sg_in_p(i,j)   = uthres_sg_in(i)
-            albedo_drag_p(i,j)    = albedo_drag(i)
-            feff_p(i,j)           = feff(i)
-            sep_in_p(i,j)         = sep_in(i)
+            rdrag_p(i,j)          = rdrag(i)
+            ssm_in_p(i,j)         = ssm_in(i)
         enddo
         enddo
       endif
@@ -735,8 +920,10 @@
       enddo
       enddo
       enddo
+     
 
-      if (num_e_ant_out .gt. 0 .and. config_anthro_scheme .ne. 'off') then
+
+      if (num_e_ant_out .gt. 0 ) then
       do n = 1, num_e_ant_out
       do j = jts, jte
       do k = kts, kte
@@ -747,8 +934,7 @@
       enddo
       enddo
       endif
-
-      if (num_e_bb_out .gt. 0 .and. config_smoke_scheme .ne. 'off') then
+      if (num_e_bb_out .gt. 0 ) then
       do n = 1, num_e_bb_out
       do j = jts, jte
       do k = kts, kte
@@ -759,13 +945,45 @@
       enddo
       enddo
       endif
-
-      if (num_e_dust_out .gt. 0 .and. config_dust_scheme .ne. 'off') then
+      if (num_e_bio_out .gt. 0 ) then
+      do n = 1, num_e_bio_out
+      do j = jts, jte
+      do k = kts, kte
+      do i = its, ite
+         e_bio_out_p(i,k,j,n) = e_bio_out(n,k,i)
+      enddo
+      enddo
+      enddo
+      enddo
+      endif
+      if (num_e_dust_out .gt. 0 ) then
       do n = 1, num_e_dust_out
       do j = jts, jte
       do k = kts, kte
       do i = its, ite
          e_dust_out_p(i,k,j,n) = e_dust_out(n,k,i)
+      enddo
+      enddo
+      enddo
+      enddo
+      endif
+      if (num_e_ss_out .gt. 0 ) then
+      do n = 1, num_e_ss_out
+      do j = jts, jte
+      do k = kts, kte
+      do i = its, ite
+         e_ss_out_p(i,k,j,n)   = e_ss_out(n,k,i)
+      enddo
+      enddo
+      enddo
+      enddo
+      endif
+      if (num_e_vol_out .gt. 0 ) then
+      do n = 1, num_e_vol_out
+      do j = jts, jte
+      do k = kts, kte
+      do i = its, ite
+         e_vol_out_p(i,k,j,n)  = e_vol_out(n,k,i)
       enddo
       enddo
       enddo
@@ -792,29 +1010,46 @@
 
 !local variables:
  real(kind=RKIND),dimension(:,:,:),pointer:: scalars,chem
+ real(kind=RKIND),dimension(:,:),pointer:: nifa,nwfa
+ real(kind=RKIND),dimension(:,:),pointer:: hno3_bkgd
  real(kind=RKIND),dimension(:,:),  pointer:: ddvel, wetdep_resolved, drydep_flux
  real(kind=RKIND),dimension(:,:,:),pointer:: tend_chem_settle
  real(kind=RKIND),dimension(:)    ,pointer:: vis
  real(kind=RKIND),dimension(:),    pointer:: frp_out, fre_out, hwp, coef_bb_dc, fire_ef_out
  real(kind=RKIND),dimension(:),    pointer:: hfx_bb, qfx_bb, frac_grid_burned
- real(kind=RKIND),dimension(:,:)  ,pointer:: PM2_5, PM10
- real(kind=RKIND),dimension(:,:)  ,pointer:: aod3d_smoke, aod3d
+ real(kind=RKIND),dimension(:,:)  ,pointer:: PM2_5, PM10, PM2_5_SOA
+ real(kind=RKIND),dimension(:,:)  ,pointer:: PM2_5_SMOKE_SOA, PM2_5_ANT_SOA
+ real(kind=RKIND),dimension(:,:)  ,pointer:: aod3d_smoke, aod3d, aod3d_simple
+ real(kind=RKIND),dimension(:,:,:),pointer:: tauaer_sw, asyaer_sw, ssaaer_sw
+ real(kind=RKIND),dimension(:,:,:),pointer:: tauaer_lw
+ 
  real(kind=RKIND),dimension(:),    pointer:: aod550
- real(kind=RKIND),dimension(:,:,:),pointer:: e_bb_out, e_dust_out, e_ant_out
+ real(kind=RKIND),dimension(:),    pointer:: aod550_simple
+ real(kind=RKIND),dimension(:,:,:),pointer:: e_ant_out, e_bb_out, e_bio_out, &
+                                             e_vol_out, e_dust_out, e_ss_out
  real(kind=RKIND),dimension(:),pointer :: aero_emis_for_enhmix
- integer,dimension(:),pointer:: min_bb_plume, max_bb_plume
+ integer,dimension(:),pointer:: min_bb_plume, max_bb_plume, max_rwc_plume
  
  integer,pointer :: chemistry_start,chemistry_end
+ integer,pointer                :: index_nifa, index_nwfa
  integer,pointer                :: ebb_dcycle
  character(len=StrKIND),pointer :: config_smoke_scheme
  character(len=StrKIND),pointer :: config_dust_scheme
+ character(len=StrKIND),pointer :: config_pollen_scheme
  character(len=StrKIND),pointer :: config_anthro_scheme
+ character(len=StrKIND),pointer :: config_anthro_pt_scheme
+ character(len=StrKIND),pointer :: config_ssalt_scheme
+ character(len=StrKIND),pointer :: config_volc_scheme
+ character(len=StrKIND),pointer :: config_sna_scheme
+ character(len=StrKIND),pointer :: config_rwc_scheme
+ integer, pointer :: config_soa_scheme
  integer, pointer :: wetdep_ls_opt
  integer, pointer :: drydep_opt
  integer, pointer :: plumerise_opt
  logical, pointer :: add_fire_heat_flux, add_fire_moist_flux
+ logical, pointer :: calc_bb_emis_online
 
- integer:: i,k,j,n
+ integer:: i,k,j,n, i0,k0,n0, j0
 
 !local pointers:
  call mpas_pool_get_array(state,'scalars',scalars,time_lev)
@@ -822,7 +1057,9 @@
  call mpas_pool_get_array(diag_physics,'PM2_5',PM2_5)
  call mpas_pool_get_array(diag_physics,'PM10',PM10)
  call mpas_pool_get_array(diag_physics,'aod3d',aod3d)
+ call mpas_pool_get_array(diag_physics,'aod3d_simple',aod3d_simple)
  call mpas_pool_get_array(diag_physics,'aod550',aod550)
+ call mpas_pool_get_array(diag_physics,'aod550_simple',aod550_simple)
 
  call mpas_pool_get_array(diag_physics,'ddvel',ddvel)
  call mpas_pool_get_array(diag_physics,'wetdep_resolved',wetdep_resolved)
@@ -837,30 +1074,68 @@
  call mpas_pool_get_dimension(state, 'chemistry_end', chemistry_end) 
  call mpas_pool_get_config(configs,'config_smoke_scheme', config_smoke_scheme)
  call mpas_pool_get_config(configs,'config_dust_scheme', config_dust_scheme)
+ call mpas_pool_get_config(configs,'config_pollen_scheme',config_pollen_scheme)
  call mpas_pool_get_config(configs,'config_anthro_scheme',config_anthro_scheme)
+ call mpas_pool_get_config(configs,'config_anthro_pt_scheme',config_anthro_pt_scheme)
+ call mpas_pool_get_config(configs,'config_ssalt_scheme',config_ssalt_scheme)
+ call mpas_pool_get_config(configs,'config_volc_scheme',config_volc_scheme)
+ call mpas_pool_get_config(configs,'config_sna_scheme',config_sna_scheme)
+ call mpas_pool_get_config(configs,'config_soa_scheme',config_soa_scheme)
+ call mpas_pool_get_config(configs,'config_rwc_scheme',config_rwc_scheme)
  call mpas_pool_get_config(configs,'ebb_dcycle', ebb_dcycle)
  call mpas_pool_get_config(configs,'wetdep_ls_opt',wetdep_ls_opt)
  call mpas_pool_get_config(configs,'drydep_opt',drydep_opt)
  call mpas_pool_get_config(configs,'plumerise_opt',plumerise_opt)
  call mpas_pool_get_config(configs,'add_fire_heat_flux',add_fire_heat_flux)
  call mpas_pool_get_config(configs,'add_fire_moist_flux',add_fire_moist_flux)
+ call mpas_pool_get_config(configs,'calc_bb_emis_online',calc_bb_emis_online)
 
+ if ( config_sna_scheme .ne. 'off' ) then
+    call mpas_pool_get_array(diag_physics,'hno3_bkgd',hno3_bkgd)
+    call mpas_pool_get_dimension(state,'index_nwfa',index_nwfa)
+    call mpas_pool_get_dimension(state,'index_nifa',index_nifa)
+    nifa => scalars(index_nifa,:,:)
+    nwfa => scalars(index_nwfa,:,:)
+ endif
+
+ if ( config_soa_scheme .ge. 1 ) then
+   call mpas_pool_get_array(diag_physics,'PM2_5_SOA',PM2_5_SOA)
+   call mpas_pool_get_array(diag_physics,'PM2_5_SMOKE_SOA',PM2_5_SMOKE_SOA)
+ endif
+ if ( config_soa_scheme .ge. 2 ) then
+   call mpas_pool_get_array(diag_physics,'PM2_5_ANT_SOA',PM2_5_ANT_SOA)
+ endif
+
+ if (num_e_ant_out .gt. 0 ) then
+    call mpas_pool_get_array(diag_physics, 'e_ant_out',e_ant_out)
+ endif
  if (num_e_bb_out .gt. 0 ) then
     call mpas_pool_get_array(diag_physics, 'e_bb_out',e_bb_out)
+ endif
+ if (num_e_bio_out .gt. 0 ) then
+    call mpas_pool_get_array(diag_physics, 'e_bio_out',e_bio_out)
  endif
  if (num_e_dust_out .gt. 0 ) then
     call mpas_pool_get_array(diag_physics, 'e_dust_out',e_dust_out)
  endif
- if (num_e_ant_out .gt. 0 ) then
-    call mpas_pool_get_array(diag_physics, 'e_ant_out',e_ant_out)
+ if (num_e_ss_out .gt. 0 ) then
+    call mpas_pool_get_array(diag_physics, 'e_ss_out',e_ss_out)
+ endif
+ if (num_e_vol_out .gt. 0) then
+    call mpas_pool_get_array(diag_physics, 'e_vol_out',e_vol_out)
  endif
  if (config_smoke_scheme .ne. 'off' ) then
     call mpas_pool_get_array(diag_physics,'aod3d_smoke',aod3d_smoke)
+    call mpas_pool_get_array(diag_physics,'tauaer_sw',tauaer_sw)
+    call mpas_pool_get_array(diag_physics,'tauaer_lw',tauaer_lw)
+    call mpas_pool_get_array(diag_physics,'ssaaer_sw',ssaaer_sw)
+    call mpas_pool_get_array(diag_physics,'asyaer_sw',asyaer_sw)
+
     call mpas_pool_get_array(diag_physics,'frp_out',frp_out)
     call mpas_pool_get_array(diag_physics,'fre_out',fre_out)
     call mpas_pool_get_array(diag_physics,'hwp',hwp)
     call mpas_pool_get_array(diag_physics,'coef_bb_dc',coef_bb_dc)
-    if (ebb_dcycle .eq. 2 ) then
+    if ( calc_bb_emis_online ) then
        call mpas_pool_get_array(diag_physics,'fire_ef_out',fire_ef_out)
     endif
     if (plumerise_opt .gt. 0 ) then
@@ -884,12 +1159,26 @@
       !
          PM2_5(k,i)     = PM2_5_p(i,k,j)
          PM10(k,i)      = PM10_p(i,k,j)
+         if ( config_soa_scheme .ge. 1 ) then
+           PM2_5_SOA(k,i) = PM2_5_SOA_p(i,k,j)
+         endif
+         if ( config_soa_scheme .ge. 2 ) then
+           PM2_5_ANT_SOA(k,i) = PM2_5_ANT_SOA_p(i,k,j)
+           PM2_5_SMOKE_SOA(k,i) = PM2_5_SMOKE_SOA_p(i,k,j)
+           PM2_5_SOA(k,i) = PM2_5_SOA_p(i,k,j)
+         endif
 
          aod3d(k,i) = aod3d_p(i,k,j)
+         aod3d_simple(k,i) = aod3d_simple_p(i,k,j)
       !
-      if ( config_smoke_scheme .ne. 'off' ) then
-         aod3d_smoke(k,i) = aod3d_smoke_p(i,k,j)
-      endif
+         if ( config_smoke_scheme .ne. 'off' ) then
+            aod3d_smoke(k,i) = aod3d_smoke_p(i,k,j)
+         endif
+         if ( config_sna_scheme .ne. 'off' ) then
+            hno3_bkgd(k,i) = hno3_bkgd_p(i,k,j)
+            nifa(k,i)      = nifa_p(i,k,j)
+            nwfa(k,i)      = nwfa_p(i,k,j)
+         endif
       enddo
       enddo
       enddo
@@ -928,20 +1217,20 @@
          aero_emis_for_enhmix(i) = 0._RKIND
       enddo
 
-      if (num_e_ant_out .gt. 0 ) then
+      if ( num_e_ant_out .gt. 0 ) then
       do n = 1, num_e_ant_out
       do j = jts,jte
       do k = kts,kte
       do i = its,ite
             e_ant_out(n,k,i) = e_ant_out_p(i,k,j,n)
-            aero_emis_for_enhmix(i) = aero_emis_for_enhmix(i) + e_ant_out_p(i,k,j,n)
+            aero_emis_for_enhmix(i) = aero_emis_for_enhmix(i) + e_ant_out_p(i,k,j,n) 
       enddo
       enddo
       enddo
       enddo
       endif
 
-      if (num_e_bb_out .gt. 0 ) then
+      if ( num_e_bb_out .gt. 0) then
       do n = 1, num_e_bb_out
       do j = jts,jte
       do k = kts,kte
@@ -952,8 +1241,20 @@
       enddo
       enddo
       endif
+     !
+      if ( num_e_bio_out .gt. 0 ) then
+      do n = 1, num_e_bio_out
+      do j = jts,jte
+      do k = kts,kte
+      do i = its,ite
+            e_bio_out(n,k,i) = e_bio_out_p(i,k,j,n)
+      enddo
+      enddo
+      enddo
+      enddo
+      endif
       !
-      if (num_e_dust_out .gt. 0 ) then
+      if (num_e_dust_out .gt. 0) then
       do n = 1, num_e_dust_out
       do j = jts,jte
       do k = kts,kte
@@ -964,17 +1265,42 @@
       enddo
       enddo
       endif
-
+     !
+      if (num_e_ss_out .gt. 0 ) then
+      do n = 1, num_e_ss_out
+      do j = jts,jte
+      do k = kts,kte
+      do i = its,ite
+            e_ss_out(n,k,i) = e_ss_out_p(i,k,j,n)
+      enddo
+      enddo
+      enddo
+      enddo
+      endif
+     !
+      if (num_e_vol_out .gt. 0 ) then
+      do n = 1, num_e_vol_out
+      do j = jts,jte
+      do k = kts,kte
+      do i = its,ite
+            e_vol_out(n,k,i) = e_vol_out_p(i,k,j,n)
+      enddo
+      enddo
+      enddo
+      enddo
+      endif
+!
       do j = jts,jte
       do i = its,ite
          vis(i)       = vis_p(i,j)
        aod550(i)      = aod550_p(i,j)
+       aod550_simple(i)      = aod550_simple_p(i,j)
          if (config_smoke_scheme .ne. 'off') then
             frp_out(i)          = frp_out_p(i,j)
             fre_out(i)          = fre_out_p(i,j)
             hwp(i)              = hwp_p(i,j)
             coef_bb_dc(i)       = coef_bb_dc_p(i,j)
-            if ( ebb_dcycle .eq. 2 ) then
+            if ( calc_bb_emis_online ) then
                fire_ef_out(i)   = fire_ef_out_p(i,j)
             endif
             if ( plumerise_opt .gt. 0 ) then
@@ -991,22 +1317,245 @@
          endif
      enddo
      enddo
+     
+     if ( config_rwc_scheme .ne. 'off' ) then  
+         call mpas_pool_get_array(diag_physics,'max_rwc_plume',max_rwc_plume)
+         do j = jts,jte
+         do i = its,ite
+            max_rwc_plume(i) = max_rwc_plume_p(i,j)
+         enddo
+         enddo
+     endif
 
  end subroutine smoke_to_MPAS
 
 !=================================================================================================================
- subroutine init_smoke(mesh,configs)
+ subroutine init_smoke(mesh,configs,emission_input,dminfo)
 !=================================================================================================================
+implicit none
+include 'mpif.h'
 
 !input arguments:
  type(mpas_pool_type),intent(in):: mesh
  type(mpas_pool_type),intent(in):: configs
+ type(mpas_pool_type),intent(inout):: emission_input
+ type (dm_info), intent(in) :: dminfo !< Input: Domain information
+ real(kind=RKIND),dimension(:,:),pointer  :: e_ant_stack_groups_in
+
+ character(len=StrKIND),pointer :: config_anthro_pt_scheme
+
+ integer,pointer :: index_STKLT,index_STKLG,nCells
+
+ real(kind=RKIND),dimension(:),pointer      :: latCell,lonCell
+ integer, dimension(:), pointer :: ant_pt_local_cell_idx, ant_pt_rank
+
+ real(kind=RKIND) :: lat1,lat2,lon1,lon2, &
+                     arg1,arg11,sphere_distance,radius,min_distance,huge_val
+ integer :: bestCell,s,n, ierr, myrank
+
+! Needed to determine if pt is actually in cell it is closest to
+logical :: is_inside
+real(kind=RKIND),dimension(:),pointer :: xCell,yCell,zCell
+integer,pointer :: nVertices
+real(kind=RKIND),dimension(:),pointer :: xVertex,yVertex,zVertex
+integer,dimension(:,:),pointer :: verticesOnCell
+integer,dimension(:),pointer ::nEdgesOnCell
+integer,dimension(:,:),pointer :: cellsOnCell
+
+integer :: c_test, c_nearest, k, iter_knt
+
+ ! Work arrays
+ real(kind=RKIND) :: R, d, d_star
+ integer, dimension(num_anthro_pt) :: best_cell_work
+ real(kind=RKIND) :: xPoint, yPoint, zPoint, xC, yC, zC
+! Testing a brute force "is_inside" O(N*M) 
+ logical, parameter :: brute_search = .false.
+! Or
+! One solution would be a kd-tree – to store the cells in a mesh
+! O(n log n) setup cost; each search takes O(log n) time, for a mesh with n cells
+! Alternatively, we can make use of the grid connectivity arrays nEdgesOnCell and
+! cellsOnCell to navigate a path of monotonically decreasing distance to the (lat,lon) location
+! No setup cost, at most O(n½) cost per search
+! here we only do it once and store 
+
+! SAVE FOR DEBUG TO CHECK AGAINST GLOBAL CELL INDEX
+!
+! integer, dimension(:),pointer :: global_cell_list, ant_pt_global_cell_idx
+! integer, dimension(num_anthro_pt) :: best_cell_global, best_rank_global
+! call mpas_pool_get_array(emission_input, 'ant_pt_global_cell_idx', ant_pt_global_cell_idx)
+! call mpas_pool_get_array(mesh,'indexToCellID',global_cell_list)
+!
+!
+ call mpas_pool_get_config(configs,'config_anthro_pt_scheme',config_anthro_pt_scheme)
+
+! For, the only reason to set these arrays is if we are doing pt source
+! plumerise emissions from the anthropogenic sector.
+
+ if ( config_anthro_pt_scheme .eq. 'off' ) return
+
+ call mpas_pool_get_array(emission_input, 'e_ant_stack_groups_in',e_ant_stack_groups_in)
+ call mpas_pool_get_dimension(emission_input,'index_STKLT',index_STKLT)
+ call mpas_pool_get_dimension(emission_input,'index_STKLG',index_STKLG)
+!
+ call mpas_pool_get_array(emission_input, 'ant_pt_local_cell_idx', ant_pt_local_cell_idx)
+ call mpas_pool_get_array(emission_input, 'ant_pt_rank', ant_pt_rank)
+ call mpas_pool_get_dimension(mesh,'nCells',nCells)
+ call mpas_pool_get_dimension(mesh,'nVertices',nVertices)
+ call mpas_pool_get_array(mesh,'latCell',latCell)
+ call mpas_pool_get_array(mesh,'lonCell',lonCell)
+
+ call mpas_pool_get_array(mesh,'xCell',xCell)
+ call mpas_pool_get_array(mesh,'yCell',yCell)
+ call mpas_pool_get_array(mesh,'zCell',zCell)
+ call mpas_pool_get_array(mesh,'xVertex',xVertex)
+ call mpas_pool_get_array(mesh,'yVertex',yVertex)
+ call mpas_pool_get_array(mesh,'zVertex',zVertex)
+ call mpas_pool_get_array(mesh,'nEdgesOnCell',nEdgesOnCell)
+ call mpas_pool_get_array(mesh,'verticesOnCell',verticesOnCell)
+ call mpas_pool_get_array(mesh,'cellsOnCell',cellsOnCell)
+
+ radius = 1.0_RKIND
+ huge_val = 1.0e30_RKIND
+
+ myrank = dminfo % my_proc_id
+
+if (brute_search ) then
+
+
+! Find local closest cell and distance for each pt source
+ do s = 1, num_anthro_pt
+   lat1 = e_ant_stack_groups_in(index_STKLT,s)
+   lon1 = e_ant_stack_groups_in(index_STKLG,s)
+   if (lon1 < 0.0_RKIND) lon1 = lon1 + 360.0_RKIND
+    
+   ! Check for valid coordinates
+   if (lat1 < -90.0_RKIND .or. lat1 > 90.0_RKIND .or. &
+        lon1 < -180.0_RKIND .or. lon1 > 360.0_RKIND) then
+       best_cell_work(s) = -1
+       cycle
+   endif
+
+   lat1 = lat1 * 3.14_RKIND / 180._RKIND
+   lon1 = lon1 * 3.14_RKIND / 180._RKIND
+    
+    best_cell_work(s) = -1
+    
+    do n = 1, nCells
+! Grabe the Cartesian coordinates and calculate the radius
+      xC     = xCell(n)
+      yC     = yCell(n)
+      zC     = zCell(n)
+      R      = sqrt(xC**2 + yC**2 + zC**2)
+! Convert the stack lat/lon to cartesain space using the same radius as
+! this cell
+      xPoint = R*(cos(lat1) * cos(lon1))
+      yPoint = R*(cos(lat1) * sin(lon1))
+      zPoint = R*(sin(lat1))
+      is_inside =  mpas_in_cell(xPoint, yPoint, zPoint, xC, &
+                    yC, zC, nEdgesOnCell(n), &
+                    verticesOnCell(:,n), xVertex, yVertex, zVertex)
+      if (is_inside) then
+!         best_cell_global(s) = global_cell_list(n)
+         best_cell_work(s) = n
+! Only one cell per pt src is possible
+         exit
+      endif
+   enddo
+enddo
+! Get the rank and local cell index of the stack location by reducing
+! best_cell_work over all ranks. The only positive value (if any) will
+! be the local_index (n) one satisfying is_inside
+do s = 1, num_anthro_pt
+   call mpas_dmpar_maxloc_int(dminfo,best_cell_work(s),ant_pt_local_cell_idx(s),ant_pt_rank(s))
+! SAVE for DEBUG -- checks local index against the global cell number
+!   call mpas_dmpar_maxloc_int(dminfo,best_cell_global(s),ant_pt_global_cell_idx(s), ant_pt_rank(s))
+enddo
+
+
+
+else
+
+
+
+ do s = 1, num_anthro_pt
+!
+   best_cell_work(s) = -1
+!
+   lat1 = e_ant_stack_groups_in(index_STKLT,s)
+   lon1 = e_ant_stack_groups_in(index_STKLG,s)
+! Convert
+   if (lon1 < 0.0_RKIND) lon1 = lon1 + 360.0_RKIND   
+! Check for valid coordinates
+   if (lat1 < -90.0_RKIND .or. lat1 > 90.0_RKIND .or. &
+        lon1 < -180.0_RKIND .or. lon1 > 360.0_RKIND) then
+       cycle
+   endif
+! Convert
+   lat1 = lat1 * 3.14_RKIND / 180._RKIND
+   lon1 = lon1 * 3.14_RKIND / 180._RKIND
+! Init
+   c_nearest = 2
+   c_test    = 0
+   do while ( c_nearest /= c_test )
+! Test location=  
+      c_test = c_nearest
+! Location of the POINT SOURCE
+      lat2   = latCell(c_test)
+      lon2   = lonCell(c_test) 
+      arg1 = sin((lat2-lat1)/2.0_RKIND)**2 + cos(lat1)*cos(lat2)*sin((lon2-lon1)/2.0_RKIND)**2
+      d = 2.0_RKIND * radius * asin(sqrt(arg1))
+! Loop over the edges of this cell
+      do n = 1, nEdgesOnCell(c_test) 
+! Grabbing the index of the Cell on That edge
+         k = cellsOnCell(n,c_test)
+! Calculate this distance
+         lat2 = latCell(k)
+         lon2 = lonCell(k)
+         arg1 = sin((lat2-lat1)/2.0_RKIND)**2 + cos(lat1)*cos(lat2)*sin((lon2-lon1)/2.0_RKIND)**2
+         d_star = 2.0_RKIND  * radius * asin(sqrt(arg1))
+! If we are closer than the original cell, update
+         if ( d_star < d ) then
+            d = d_star
+            c_nearest = k
+         endif
+      enddo
+   enddo
+! Grabe the Cartesian coordinates and calculate the radius
+   xC     = xCell(c_nearest)
+   yC     = yCell(c_nearest)
+   zC     = zCell(c_nearest)
+   R      = sqrt(xC**2 + yC**2 + zC**2)
+! Convert lat/lon to cartesain space using the same radius as this cell
+   xPoint = R*(cos(lat1) * cos(lon1))
+   yPoint = R*(cos(lat1) * sin(lon1))
+   zPoint = R*(sin(lat1))
+! Test
+   is_inside =  mpas_in_cell(xPoint, yPoint, zPoint, xC, &
+                 yC, zC, nEdgesOnCell(c_nearest), &
+                 verticesOnCell(:,c_nearest), xVertex, yVertex, zVertex)
+! Place a -1, only the one inside will be positive
+   if ( is_inside) then
+      best_cell_work(s) = c_nearest
+   endif
+enddo
+! Get the rank and local cell index of the stack location by reducing
+! best_cell_work over all ranks. The only positive value (if any) will
+! be the local_index (n) one satisfying is_inside
+do s = 1, num_anthro_pt
+   call mpas_dmpar_maxloc_int(dminfo,best_cell_work(s),ant_pt_local_cell_idx(s),ant_pt_rank(s))
+! SAVE for DEBUG -- checks local index against the global cell number
+!   call mpas_dmpar_maxloc_int(dminfo,best_cell_global(s),ant_pt_global_cell_idx(s), ant_pt_rank(s))
+enddo
+
+endif
+
+
 
  end subroutine init_smoke
 
 !=================================================================================================================
  subroutine driver_smoke(itimestep,time_lev,emission_input,state,configs,   &
-                         mesh,sfc_input,diag_physics,tend_physics,its,ite)
+                         mesh,sfc_input,diag_physics,tend_physics,its,ite,dminfo)
 !=================================================================================================================
 
 !input arguments:
@@ -1014,6 +1563,7 @@
  type(mpas_pool_type),intent(in)   :: mesh
  type(mpas_pool_type),intent(inout):: state
  type(mpas_pool_type),intent(in)   :: emission_input
+ type (dm_info), intent(in) :: dminfo !< Input: Domain information
 
  integer,intent(in):: its,ite
  integer,intent(in):: itimestep
@@ -1028,30 +1578,99 @@
  real(kind=RKIND):: curr_secs, dt
 
  !local pointers:
- integer,pointer :: index_smoke_fine
- integer,pointer :: index_dust_fine, index_dust_coarse
- integer,pointer :: index_unspc_fine
- integer,pointer :: index_e_bb_in_smoke_fine
- integer,pointer :: index_e_ant_in_unspc_fine
- integer,pointer :: index_e_ant_in_unspc_coarse
- integer,pointer :: index_e_bb_out_smoke_fine
- integer,pointer :: index_e_dust_out_dust_fine, index_e_dust_out_dust_coarse
- integer,pointer :: index_e_ant_out_unspc_fine, index_e_ant_out_unspc_coarse
+ integer,pointer :: index_smoke_ultrafine, index_smoke_fine, index_smoke_coarse
+ integer,pointer :: index_bbvoc, index_antvoc, index_bbsoa, index_antsoa, index_soa
+ integer,pointer :: index_dust_ultrafine, index_dust_fine, index_dust_coarse
+ integer,pointer :: index_polp_tree, index_polp_grass, index_polp_weed, index_polp_all,&
+                    index_pols_tree, index_pols_grass, index_pols_weed, index_pols_all
+ integer,pointer :: index_unspc_ultrafine, index_unspc_fine, index_unspc_coarse
+ integer,pointer :: index_ssalt_fine, index_ssalt_coarse
+ integer,pointer :: index_no3_a_fine, index_so4_a_fine, index_nh4_a_fine
+ integer,pointer :: index_so2
+ integer,pointer :: index_nh3
+ integer,pointer :: index_ch4
+ integer,pointer :: index_co
+ integer,pointer :: index_nox
+ integer,pointer :: index_bact_fine
 
-                  
+ integer,pointer :: index_e_bb_in_smoke_ultrafine
+ integer,pointer :: index_e_bb_in_smoke_fine
+ integer,pointer :: index_e_bb_in_smoke_coarse
+ integer,pointer :: index_e_bb_in_ch4
+ integer,pointer :: index_e_bb_in_co
+ integer,pointer :: index_e_bb_in_nox
+ integer,pointer :: index_e_bb_in_so2
+ integer,pointer :: index_e_bb_in_nh3
+
+ integer,pointer :: index_e_ant_in_smoke_ultrafine, index_e_ant_in_smoke_fine, index_e_ant_in_smoke_coarse
+ integer,pointer :: index_e_ant_in_unspc_ultrafine, index_e_ant_in_unspc_fine, index_e_ant_in_unspc_coarse
+ integer,pointer :: index_e_ant_in_no3_a_fine, index_e_ant_in_so4_a_fine
+ integer,pointer :: index_e_ant_in_nh4_a_fine, index_e_ant_in_so2
+ integer,pointer :: index_e_ant_in_nh3
+ integer,pointer :: index_e_ant_in_nox
+ integer,pointer :: index_e_ant_in_ch4
+ integer,pointer :: index_e_ant_in_co
+
+ integer,pointer :: index_STKHT,index_STKDM,index_STKTK,index_STKVE, &
+                    index_STKLT,index_STKLG
+ integer,pointer :: index_e_ant_pt_in_unspc_fine
+ integer, dimension(:), pointer :: ant_pt_local_cell_idx, ant_pt_rank
+! integer,dimension(:),pointer :: ant_pt_global_cell_idx
+ integer         :: myrank, ierr
+ 
+ integer,pointer :: index_e_bio_in_polp_tree, index_e_bio_in_polp_grass, index_e_bio_in_polp_weed
+
+ integer,pointer :: index_e_vol_in_vash_fine,  index_e_vol_in_vash_coarse
+
+ integer,pointer :: index_e_bb_out_smoke_ultrafine
+ integer,pointer :: index_e_bb_out_smoke_fine
+ integer,pointer :: index_e_bb_out_smoke_coarse
+ integer,pointer :: index_e_bb_out_ch4 
+ integer,pointer :: index_e_bb_out_co
+ integer,pointer :: index_e_bb_out_nox
+ integer,pointer :: index_e_bb_out_so2
+ integer,pointer :: index_e_bb_out_nh3
+
+ integer,pointer :: index_e_dust_out_dust_ultrafine, index_e_dust_out_dust_fine, index_e_dust_out_dust_coarse
+
+ integer,pointer :: index_e_ant_out_unspc_ultrafine, index_e_ant_out_unspc_fine, index_e_ant_out_unspc_coarse
+ integer,pointer :: index_e_ant_out_smoke_ultrafine, index_e_ant_out_smoke_fine, index_e_ant_out_smoke_coarse
+ integer,pointer :: index_e_ant_out_no3_a_fine, index_e_ant_out_so4_a_fine
+ integer,pointer :: index_e_ant_out_nh4_a_fine, index_e_ant_out_so2
+ integer,pointer :: index_e_ant_out_nh3
+ integer,pointer :: index_e_ant_out_nox
+ integer,pointer :: index_e_ant_out_ch4
+ integer,pointer :: index_e_ant_out_co
+
+ integer,pointer :: index_e_bio_out_polp_tree, index_e_bio_out_polp_grass, index_e_bio_out_polp_weed
+
+ integer,pointer :: index_e_vol_out_vash_fine,  index_e_vol_out_vash_coarse
+
+ integer,pointer :: index_e_ss_out_ssalt_fine, index_e_ss_out_ssalt_coarse
+
+ integer,dimension(:),pointer   :: globalCells
  integer,pointer                :: chemistry_start
  !namelists
  logical,pointer                :: config_do_restart
  character(len=StrKIND),pointer :: config_smoke_scheme
  character(len=StrKIND),pointer :: config_dust_scheme
+ character(len=StrKIND),pointer :: config_pollen_scheme
  character(len=StrKIND),pointer :: config_anthro_scheme
+ character(len=StrKIND),pointer :: config_ssalt_scheme
+ character(len=StrKIND),pointer :: config_volc_scheme
+ character(len=StrKIND),pointer :: config_sna_scheme
+ character(len=StrKIND),pointer :: config_methane_scheme
+ character(len=StrKIND),pointer :: config_bact_scheme
  character(len=StrKIND),pointer :: config_rwc_scheme
- logical                        :: do_mpas_smoke, do_mpas_dust, do_mpas_anthro, do_mpas_rwc
+ character(len=StrKIND),pointer :: config_extra_chemical_tracers
+ character(len=StrKIND),pointer :: config_anthro_pt_scheme
+ logical,pointer :: config_ultrafine, config_coarse
+ integer,pointer :: config_soa_scheme
  integer,pointer                :: hwp_method
  real(kind=RKIND),pointer       :: hwp_alpha
  integer,pointer                :: wetdep_ls_opt
  real(kind=RKIND),pointer       :: wetdep_ls_alpha
- integer,pointer                :: plumerise_opt
+ integer,pointer                :: plumerise_opt, plumerise_opt_rwc
  integer,pointer                :: plume_wind_eff
  real(kind=RKIND),pointer       :: plume_alpha
  real(kind=RKIND),pointer       :: bb_emis_scale_factor, bb_qv_scale_factor
@@ -1063,17 +1682,62 @@
  logical,pointer                :: calc_bb_emis_online
  logical,pointer                :: add_fire_heat_flux
  logical,pointer                :: add_fire_moist_flux
+ integer,pointer                :: config_mie_aod_opt
+ integer,pointer                :: aero_dir_rad_fdb
  integer,pointer                :: plumerisefire_frq
+ real(kind=RKIND),pointer       :: rwc_emis_scale_factor
+ real(kind=RKIND),pointer       :: anthro_emis_scale_factor, anthro_pt_emis_scale_factor
  real(kind=RKIND),pointer       :: dust_alpha, dust_gamma
  real(kind=RKIND),pointer       :: dust_drylimit_factor, dust_moist_correction
- real(kind=RKIND),pointer       :: rwc_emis_scale_factor
+ real(kind=RKIND),pointer       :: pollen_emis_scale_factor,  num_pols_per_polp
+ real(kind=RKIND),pointer       :: tree_pollen_emis_scale_factor,  &
+                                   grass_pollen_emis_scale_factor, &
+                                   weed_pollen_emis_scale_factor
+ logical                        :: do_mpas_smoke,do_mpas_pollen, &
+                                   do_mpas_dust,do_mpas_anthro,  &
+                                   do_mpas_ssalt, do_mpas_volc,  &
+                                   do_mpas_sna, do_mpas_methane, &
+                                   do_mpas_soa, &
+                                   do_mpas_hab, do_mpas_rwc, do_mpas_anthro_pt
+ integer                        :: i,j,k,nblocks, n
+! --------------------------------------------------------------------------------------
+!  Local Variables for Spectral Interpolation
+! --------------------------------------------------------------------------------------
+! 1. Source Wavelengths (Smoke output: 300, 400, 600, 999 nm)
+ real(kind=RKIND), dimension(4), parameter :: src_wav = &
+      (/ 0.300_RKIND, 0.400_RKIND, 0.600_RKIND, 0.999_RKIND /)
+! 2. Target Wavelengths (RRTMG Bands 1-14 midpoints)
+ real(kind=RKIND), dimension(14), parameter :: dst_wav = &
+      (/ 3.4615_RKIND, 2.7885_RKIND, 2.3256_RKIND, 2.0460_RKIND, &
+         1.7840_RKIND, 1.4625_RKIND, 1.2705_RKIND, 1.0101_RKIND, &
+         0.7016_RKIND, 0.5332_RKIND, 0.3931_RKIND, 0.3040_RKIND, &
+         0.2315_RKIND, 8.0205_RKIND /)
 
- integer                        :: i,j,k,nblocks
+ real(kind=RKIND), parameter :: thresh = 1.0e-9_RKIND
+ real(kind=RKIND) :: ang, slope
+ real(kind=RKIND), dimension(:,:,:), pointer :: tauaer_sw
+ real(kind=RKIND), dimension(:,:,:), pointer :: tauaer_lw
+ real(kind=RKIND), dimension(:,:,:), pointer :: ssaaer_sw
+ real(kind=RKIND), dimension(:,:,:), pointer :: asyaer_sw
+ integer :: idx_300, idx_400, idx_600, idx_999, k_end
+! --------------------------------------------------------------------------------------
+
+ myrank = dminfo % my_proc_id
+
 
  do_mpas_smoke  = .false.
  do_mpas_dust   = .false.
+ do_mpas_pollen = .false.
  do_mpas_anthro = .false.
+ do_mpas_anthro_pt = .false.
+ do_mpas_ssalt  = .false.
+ do_mpas_volc   = .false.
+ do_mpas_sna    = .false.
+ do_mpas_soa    = .false.
+ do_mpas_methane= .false.
+ do_mpas_hab    = .false.
  do_mpas_rwc    = .false.
+ nblocks        = 1
 
 !copy MPAS arrays to local arrays:
  call smoke_from_MPAS(dt_dyn, time_lev, emission_input, state, configs, mesh, &
@@ -1083,11 +1747,23 @@
 ! Namelist: schemes
  call mpas_pool_get_config(configs,'config_smoke_scheme', config_smoke_scheme)
  call mpas_pool_get_config(configs,'config_dust_scheme', config_dust_scheme)
- call mpas_pool_get_config(configs,'config_anthro_scheme', config_anthro_scheme)
+ call mpas_pool_get_config(configs,'config_pollen_scheme',config_pollen_scheme)
+ call mpas_pool_get_config(configs,'config_anthro_scheme',config_anthro_scheme)
+ call mpas_pool_get_config(configs,'config_ssalt_scheme',config_ssalt_scheme)
+ call mpas_pool_get_config(configs,'config_volc_scheme',config_volc_scheme)
+ call mpas_pool_get_config(configs,'config_sna_scheme',config_sna_scheme)
+ call mpas_pool_get_config(configs,'config_soa_scheme',config_soa_scheme)
+ call mpas_pool_get_config(configs,'config_methane_scheme',config_methane_scheme)
+ call mpas_pool_get_config(configs,'config_bact_scheme',config_bact_scheme)
+ call mpas_pool_get_config(configs,'config_ultrafine',config_ultrafine)
+ call mpas_pool_get_config(configs,'config_coarse',config_coarse)
+ call mpas_pool_get_config(configs,'config_extra_chemical_tracers',config_extra_chemical_tracers)
+ call mpas_pool_get_config(configs,'config_anthro_pt_scheme',config_anthro_pt_scheme)
 ! Namelist: smoke
  call mpas_pool_get_config(configs,'hwp_method',hwp_method)
  call mpas_pool_get_config(configs,'hwp_alpha',hwp_alpha)
  call mpas_pool_get_config(configs,'plumerise_opt',plumerise_opt)
+ call mpas_pool_get_config(configs,'plumerise_opt_rwc',plumerise_opt_rwc)
  call mpas_pool_get_config(configs,'plume_wind_eff',plume_wind_eff)
  call mpas_pool_get_config(configs,'plume_alpha',plume_alpha)
  call mpas_pool_get_config(configs,'bb_emis_scale_factor',bb_emis_scale_factor)
@@ -1100,176 +1776,610 @@
  call mpas_pool_get_config(configs,'bb_beta',bb_beta)
  call mpas_pool_get_config(configs,'bb_qv_scale_factor',bb_qv_scale_factor)
  call mpas_pool_get_config(configs,'config_rwc_scheme',config_rwc_scheme)
-  call mpas_pool_get_config(configs,'rwc_emis_scale_factor',rwc_emis_scale_factor)
+ call mpas_pool_get_config(configs,'rwc_emis_scale_factor',rwc_emis_scale_factor)
+! Namelist: anthro
+ call mpas_pool_get_config(configs,'anthro_emis_scale_factor',anthro_emis_scale_factor)
+ call mpas_pool_get_config(configs,'anthro_pt_emis_scale_factor',anthro_pt_emis_scale_factor)
 ! Namelist: Wet/dry deposition
  call mpas_pool_get_config(configs,'wetdep_ls_opt',wetdep_ls_opt)
  call mpas_pool_get_config(configs,'wetdep_ls_alpha',wetdep_ls_alpha) 
  call mpas_pool_get_config(configs,'drydep_opt',drydep_opt)
  call mpas_pool_get_config(configs,'pm_settling',pm_settling)
 ! Namelist: dust
+ call mpas_pool_get_config(configs,'aero_dir_rad_fdb',aero_dir_rad_fdb)
  call mpas_pool_get_config(configs,'dust_alpha', dust_alpha)
  call mpas_pool_get_config(configs,'dust_gamma', dust_gamma)
  call mpas_pool_get_config(configs,'dust_drylimit_factor' ,dust_drylimit_factor)
  call mpas_pool_get_config(configs,'dust_moist_correction', dust_moist_correction)
+! Namelist: pollen
+ call mpas_pool_get_config(configs,'num_pols_per_polp',num_pols_per_polp)
+ call mpas_pool_get_config(configs,'pollen_emis_scale_factor',pollen_emis_scale_factor)
+ call mpas_pool_get_config(configs,'tree_pollen_emis_scale_factor',tree_pollen_emis_scale_factor)
+ call mpas_pool_get_config(configs,'grass_pollen_emis_scale_factor',grass_pollen_emis_scale_factor)
+ call mpas_pool_get_config(configs,'weed_pollen_emis_scale_factor',weed_pollen_emis_scale_factor)
 ! Indexes: emissions in
- call mpas_pool_get_dimension(emission_input,'index_e_bb_in_smoke_fine',index_e_bb_in_smoke_fine)
+ call mpas_pool_get_dimension(emission_input,'index_e_ant_in_smoke_ultrafine', index_e_ant_in_smoke_ultrafine)
+ call mpas_pool_get_dimension(emission_input,'index_e_ant_in_smoke_fine', index_e_ant_in_smoke_fine)
+ call mpas_pool_get_dimension(emission_input,'index_e_ant_in_smoke_coarse',index_e_ant_in_smoke_coarse)
+ call mpas_pool_get_dimension(emission_input,'index_e_ant_in_unspc_ultrafine',index_e_ant_in_unspc_ultrafine)
  call mpas_pool_get_dimension(emission_input,'index_e_ant_in_unspc_fine',index_e_ant_in_unspc_fine)
  call mpas_pool_get_dimension(emission_input,'index_e_ant_in_unspc_coarse',index_e_ant_in_unspc_coarse)
+ call mpas_pool_get_dimension(emission_input,'index_e_ant_in_no3_a_fine',index_e_ant_in_no3_a_fine)
+ call mpas_pool_get_dimension(emission_input,'index_e_ant_in_so4_a_fine',index_e_ant_in_so4_a_fine)
+ call mpas_pool_get_dimension(emission_input,'index_e_ant_in_nh4_a_fine',index_e_ant_in_nh4_a_fine)
+ call mpas_pool_get_dimension(emission_input,'index_e_ant_in_nh3',index_e_ant_in_nh3)
+ call mpas_pool_get_dimension(emission_input,'index_e_ant_in_so2',index_e_ant_in_so2)
+ call mpas_pool_get_dimension(emission_input,'index_e_ant_in_ch4',index_e_ant_in_ch4)
+ call mpas_pool_get_dimension(emission_input,'index_e_ant_in_nox',index_e_ant_in_nox)
+ call mpas_pool_get_dimension(emission_input,'index_e_ant_in_co',index_e_ant_in_co)
 
+ if ( config_anthro_pt_scheme .ne. 'off') then
+ call mpas_pool_get_dimension(emission_input,'index_STKHT',index_STKHT)
+ call mpas_pool_get_dimension(emission_input,'index_STKDM',index_STKDM)
+ call mpas_pool_get_dimension(emission_input,'index_STKTK',index_STKTK)
+ call mpas_pool_get_dimension(emission_input,'index_STKVE',index_STKVE)
+ call mpas_pool_get_dimension(emission_input,'index_STKLT',index_STKLT)
+ call mpas_pool_get_dimension(emission_input,'index_STKLG',index_STKLG)
+ call mpas_pool_get_dimension(emission_input,'index_e_ant_pt_in_unspc_fine',index_e_ant_pt_in_unspc_fine)
+ call mpas_pool_get_array(emission_input, 'ant_pt_local_cell_idx', ant_pt_local_cell_idx)
+ call mpas_pool_get_array(emission_input, 'ant_pt_rank', ant_pt_rank)
+! call mpas_pool_get_array(emission_input, 'ant_pt_global_cell_idx', ant_pt_global_cell_idx)
+ call mpas_pool_get_array(mesh,'indexToCellID',globalCells)
+endif
+
+!
+ call mpas_pool_get_dimension(emission_input,'index_e_bb_in_smoke_ultrafine',index_e_bb_in_smoke_ultrafine)
+ call mpas_pool_get_dimension(emission_input,'index_e_bb_in_smoke_fine',index_e_bb_in_smoke_fine)
+ call mpas_pool_get_dimension(emission_input,'index_e_bb_in_smoke_coarse',index_e_bb_in_smoke_coarse)
+ call mpas_pool_get_dimension(emission_input,'index_e_bb_in_ch4',index_e_bb_in_ch4)
+ call mpas_pool_get_dimension(emission_input,'index_e_bb_in_nox',index_e_bb_in_nox)
+ call mpas_pool_get_dimension(emission_input,'index_e_bb_in_so2',index_e_bb_in_so2)
+ call mpas_pool_get_dimension(emission_input,'index_e_bb_in_co',index_e_bb_in_co)
+ call mpas_pool_get_dimension(emission_input,'index_e_bb_in_nh3',index_e_bb_in_nh3)
+!
+ call mpas_pool_get_dimension(emission_input,'index_e_bio_in_polp_tree',index_e_bio_in_polp_tree)
+ call mpas_pool_get_dimension(emission_input,'index_e_bio_in_polp_grass',index_e_bio_in_polp_grass)
+ call mpas_pool_get_dimension(emission_input,'index_e_bio_in_polp_weed',index_e_bio_in_polp_weed)
+!
+ call mpas_pool_get_dimension(emission_input,'index_e_vol_in_vash_fine',index_e_vol_in_vash_fine)
+ call mpas_pool_get_dimension(emission_input,'index_e_vol_in_vash_coarse',index_e_vol_in_vash_coarse)
 ! Indexes: emissions out
- call mpas_pool_get_dimension(diag_physics,'index_e_bb_out_smoke_fine',index_e_bb_out_smoke_fine)
-
- call mpas_pool_get_dimension(diag_physics,'index_e_dust_out_dust_fine',index_e_dust_out_dust_fine)
- call mpas_pool_get_dimension(diag_physics,'index_e_dust_out_dust_coarse',index_e_dust_out_dust_coarse)
-
+ call mpas_pool_get_dimension(diag_physics,'index_e_ant_out_smoke_ultrafine',index_e_ant_out_smoke_ultrafine)
+ call mpas_pool_get_dimension(diag_physics,'index_e_ant_out_smoke_fine',index_e_ant_out_smoke_fine)
+ call mpas_pool_get_dimension(diag_physics,'index_e_ant_out_smoke_coarse',index_e_ant_out_smoke_coarse)
+ call mpas_pool_get_dimension(diag_physics,'index_e_ant_out_unspc_ultrafine',index_e_ant_out_unspc_ultrafine)
  call mpas_pool_get_dimension(diag_physics,'index_e_ant_out_unspc_fine',index_e_ant_out_unspc_fine)
  call mpas_pool_get_dimension(diag_physics,'index_e_ant_out_unspc_coarse',index_e_ant_out_unspc_coarse)
-
+ call mpas_pool_get_dimension(diag_physics,'index_e_ant_out_no3_a_fine',index_e_ant_out_no3_a_fine)
+ call mpas_pool_get_dimension(diag_physics,'index_e_ant_out_so4_a_fine',index_e_ant_out_so4_a_fine)
+ call mpas_pool_get_dimension(diag_physics,'index_e_ant_out_nh4_a_fine',index_e_ant_out_nh4_a_fine)
+ call mpas_pool_get_dimension(diag_physics,'index_e_ant_out_nh3',index_e_ant_out_nh3)
+ call mpas_pool_get_dimension(diag_physics,'index_e_ant_out_so2',index_e_ant_out_so2)
+ call mpas_pool_get_dimension(diag_physics,'index_e_ant_out_nox',index_e_ant_out_nox)
+ call mpas_pool_get_dimension(diag_physics,'index_e_ant_out_co',index_e_ant_out_co)
+ call mpas_pool_get_dimension(diag_physics,'index_e_ant_out_ch4',index_e_ant_out_ch4)
+!
+ call mpas_pool_get_dimension(diag_physics,'index_e_bb_out_smoke_ultrafine',index_e_bb_out_smoke_ultrafine)
+ call mpas_pool_get_dimension(diag_physics,'index_e_bb_out_smoke_fine',index_e_bb_out_smoke_fine)
+ call mpas_pool_get_dimension(diag_physics,'index_e_bb_out_smoke_coarse',index_e_bb_out_smoke_coarse)
+ call mpas_pool_get_dimension(diag_physics,'index_e_bb_out_nh3',index_e_bb_out_nh3)
+ call mpas_pool_get_dimension(diag_physics,'index_e_bb_out_ch4',index_e_bb_out_ch4)
+ call mpas_pool_get_dimension(diag_physics,'index_e_bb_out_nox',index_e_bb_out_nox)
+ call mpas_pool_get_dimension(diag_physics,'index_e_bb_out_so2',index_e_bb_out_so2)
+ call mpas_pool_get_dimension(diag_physics,'index_e_bb_out_co',index_e_bb_out_co)
+!
+ call mpas_pool_get_dimension(diag_physics,'index_e_bio_out_polp_tree',index_e_bio_out_polp_tree)
+ call mpas_pool_get_dimension(diag_physics,'index_e_bio_out_polp_grass',index_e_bio_out_polp_grass)
+ call mpas_pool_get_dimension(diag_physics,'index_e_bio_out_polp_weed',index_e_bio_out_polp_weed)
+!
+ call mpas_pool_get_dimension(diag_physics,'index_e_dust_out_dust_ultrafine',index_e_dust_out_dust_ultrafine)
+ call mpas_pool_get_dimension(diag_physics,'index_e_dust_out_dust_fine',index_e_dust_out_dust_fine)
+ call mpas_pool_get_dimension(diag_physics,'index_e_dust_out_dust_coarse',index_e_dust_out_dust_coarse)
+!
+ call mpas_pool_get_dimension(diag_physics,'index_e_ss_out_ssalt_fine',index_e_ss_out_ssalt_fine)
+ call mpas_pool_get_dimension(diag_physics,'index_e_ss_out_ssalt_coarse',index_e_ss_out_ssalt_coarse)
+!
+ call mpas_pool_get_dimension(diag_physics,'index_e_vol_out_vash_fine',index_e_vol_out_vash_fine)
+ call mpas_pool_get_dimension(diag_physics,'index_e_vol_out_vash_coarse',index_e_vol_out_vash_coarse)
+!
 ! Tracer indexes
  call mpas_pool_get_dimension(state,'chemistry_start', chemistry_start) 
+!
+ call mpas_pool_get_dimension(state,'index_smoke_ultrafine' ,index_smoke_ultrafine )
  call mpas_pool_get_dimension(state,'index_smoke_fine'  ,index_smoke_fine )
+ call mpas_pool_get_dimension(state,'index_smoke_coarse'  ,index_smoke_coarse ) 
+ call mpas_pool_get_dimension(state,'index_antvoc' ,index_antvoc)
+ call mpas_pool_get_dimension(state,'index_bbvoc'  ,index_bbvoc)
+ call mpas_pool_get_dimension(state,'index_antsoa' ,index_antsoa)
+ call mpas_pool_get_dimension(state,'index_bbsoa'  ,index_bbsoa)
+ call mpas_pool_get_dimension(state,'index_soa'   ,index_soa)
+
+ call mpas_pool_get_dimension(state,'index_dust_ultrafine' ,index_dust_ultrafine )
  call mpas_pool_get_dimension(state,'index_dust_fine'  ,index_dust_fine )
  call mpas_pool_get_dimension(state,'index_dust_coarse'  ,index_dust_coarse )
- call mpas_pool_get_dimension(state,'index_unspc_fine' ,index_unspc_fine )
+ ! Mie Calculation added here
+ call mpas_pool_get_config(configs,'config_mie_aod_opt', config_mie_aod_opt)
+! call aero_rad_init(configs)
+ call mpas_pool_get_array(diag_physics, 'tauaer_sw', tauaer_sw)
+ call mpas_pool_get_array(diag_physics, 'tauaer_lw', tauaer_lw)
+ call mpas_pool_get_array(diag_physics, 'ssaaer_sw', ssaaer_sw)
+ call mpas_pool_get_array(diag_physics, 'asyaer_sw', asyaer_sw)
+!
+ call mpas_pool_get_dimension(state,'index_polp_tree'  ,index_polp_tree )
+ call mpas_pool_get_dimension(state,'index_polp_grass'  ,index_polp_grass )
+ call mpas_pool_get_dimension(state,'index_polp_weed'  ,index_polp_weed )
+ call mpas_pool_get_dimension(state,'index_polp_all'  ,index_polp_all )
+ call mpas_pool_get_dimension(state,'index_pols_all'  ,index_pols_all )
+ call mpas_pool_get_dimension(state,'index_pols_tree'  ,index_pols_tree )
+ call mpas_pool_get_dimension(state,'index_pols_grass'  ,index_pols_grass )
+ call mpas_pool_get_dimension(state,'index_pols_weed'  ,index_pols_weed )
+!
+ call mpas_pool_get_dimension(state,'index_ssalt_fine'  ,index_ssalt_fine )
+ call mpas_pool_get_dimension(state,'index_ssalt_coarse'  ,index_ssalt_coarse )
+!
+ call mpas_pool_get_dimension(state,'index_unspc_ultrafine' ,index_unspc_ultrafine )
+ call mpas_pool_get_dimension(state,'index_unspc_fine'  ,index_unspc_fine )
+ call mpas_pool_get_dimension(state,'index_unspc_coarse'  ,index_unspc_coarse )
+!
+ call mpas_pool_get_dimension(state,'index_no3_a_fine',index_no3_a_fine)
+ call mpas_pool_get_dimension(state,'index_so4_a_fine',index_so4_a_fine)
+ call mpas_pool_get_dimension(state,'index_nh4_a_fine',index_nh4_a_fine)
+!
+ call mpas_pool_get_dimension(state,'index_so2',index_so2)
+ call mpas_pool_get_dimension(state,'index_nh3',index_nh3)
+ call mpas_pool_get_dimension(state,'index_nox',index_nox)
+ call mpas_pool_get_dimension(state,'index_co',index_co)
+ call mpas_pool_get_dimension(state,'index_ch4',index_ch4)
+!
+ call mpas_pool_get_dimension(state,'index_bact_fine',index_bact_fine)
 
  initflag = 1
  if(config_do_restart .or. itimestep > 1) initflag = 0
 
  if ( config_smoke_scheme  .ne. 'off' .and. &
-    (index_smoke_fine .gt. 0 )) then
+    (index_smoke_ultrafine .gt. 0 .or. index_smoke_ultrafine .gt. 0 .or. index_smoke_ultrafine .gt. 0 .or. &
+     index_co .gt. 0 .or. index_nox .gt. 0 .or. index_ch4 .or. index_so2 .gt. 0 .or. index_nh3 .gt. 0 )) then
      do_mpas_smoke = .true.
      if ( ebb_dcycle == 2 ) then
         nblocks = 24 / bb_input_prevh
      endif
  endif
  if (config_rwc_scheme .ne. 'off' .and. (index_smoke_fine .gt. 0 .or. &
-     index_unspc_fine .gt. 0 )) then
+     index_smoke_coarse .gt. 0 .or. index_unspc_fine .gt. 0 .or. &
+     index_unspc_coarse .gt. 0 )) then
      do_mpas_rwc = .true.
- endif
+endif
+!        
  if (config_dust_scheme   .ne. 'off'  .and. &
     (index_dust_fine .gt. 0 .or. index_dust_coarse .gt. 0 )) then
      do_mpas_dust  = .true.
  endif
+!
+ if (config_pollen_scheme .ne. 'off' .and. &
+    (index_polp_tree .gt. 0 .or. index_polp_grass .gt. 0 .or. index_polp_weed .gt. 0 .or. index_polp_all .gt. 0)) then
+    do_mpas_pollen= .true.
+ endif
+!        
  if (config_anthro_scheme .ne. 'off' .and. &
-    index_unspc_fine .gt. 0 ) then
+    (index_unspc_ultrafine .gt. 0 .or. index_unspc_fine .gt. 0 .or. index_unspc_coarse .gt. 0 .or. &
+     index_smoke_ultrafine .gt. 0 .or. index_smoke_fine .gt. 0 .or. index_smoke_coarse            )) then
       do_mpas_anthro= .true.
  endif
+!      
+ if (config_ssalt_scheme  .ne. 'off' .and. &
+    (index_ssalt_fine .gt. 0 .or. index_ssalt_coarse .gt. 0 )) then
+     do_mpas_ssalt = .true.
+ endif
+ if (config_volc_scheme   .ne. 'off') do_mpas_volc  = .true.
+!
+ if (config_sna_scheme .ne. 'off' .and. &
+    (index_no3_a_fine .gt. 0 .and. index_so4_a_fine .gt. 0 .and. index_nh4_a_fine .gt. 0 .and. &
+     index_so2 .gt. 0 .and. index_nh3 .gt. 0)) then
+    do_mpas_sna = .true.
+ endif
+!
+ if (config_methane_scheme .ne. 'off' .and. index_ch4 .gt. 0 ) then
+    do_mpas_methane = .true.
+ endif
+ if (config_bact_scheme .ne. 'off' .and. index_bact_fine .gt. 0) then
+    do_mpas_hab = .true.
+ endif
+ if (config_anthro_pt_scheme .ne. 'off') then
+    do_mpas_anthro_pt = .true.
+ endif
+ if (config_soa_scheme .ne. 0 ) then
+   do_mpas_soa = .true.
+ endif
 
- call mpas_timer_start('mpas_smoke')
- call mpas_smoke_driver(                                                                 &
+  call mpas_timer_start('mpas_smoke')
+  call mpas_smoke_driver(                                              &
+!--- Configs
+            configs = configs,                                                &
 !--- Chemistry array
-           chem  = chem_p, num_chem = num_chem, chemistry_start = chemistry_start,       &
+            chem  = chem_p,                                                   &
+            num_chem = num_chem,                                              &
+            chemistry_start = chemistry_start,                                &
 !--- Number vertical levels in emissions
-           kanthro = kanthro,  kfire = kwildfire, kbio = kbiogenic, kvol = kvolcanic,    &
-           krwc = kreswoodcomb,                                                          &
+            kanthro = kanthro,                                                &
+            kfire   = kwildfire,                                              &
+            kbio    = kbiogenic,                                              &
+            kvol    = kvolcanic,                                              &
 !--- Emission arrays
-           e_bb_in        = e_bb_in_p,     e_bb_out       = e_bb_out_p,                  &
-           e_ant_in       = e_ant_in_p,    e_ant_out      = e_ant_out_p,                 &
-           e_dust_out     = e_dust_out_p,                                                &
+            do_mpas_anthro_pt = do_mpas_anthro_pt,                            &
+            e_ant_pt_in = e_ant_pt_in_p,                                      &
+            e_ant_stack_groups_in = e_ant_stack_groups_in_p,                  &
+            num_e_ant_pt_in = num_e_ant_pt_in,                                &
+            num_e_ant_stack_groups_in = num_e_ant_stack_groups_in,            &
+            num_anthro_pt = num_anthro_pt,                                    &
+            index_STKHT = index_STKHT,                                        &
+            index_STKDM = index_STKDM,                                        &
+            index_STKTK = index_STKTK,                                        &
+            index_STKVE = index_STKVE,                                        &
+            index_STKLT = index_STKLT,                                        &
+            index_STKLG = index_STKLG,                                        &
+            index_e_ant_pt_in_unspc_fine = index_e_ant_pt_in_unspc_fine,      &
+            ant_pt_local_cell_idx = ant_pt_local_cell_idx,                    &
+            ant_pt_rank = ant_pt_rank,                                        &
+            myrank = myrank,                                                  &
+            e_ant_in  = e_ant_in_p,                                           &
+            e_bb_in   = e_bb_in_p,                                            &
+            e_bio_in  = e_bio_in_p,                                           &
+            e_vol_in  = e_vol_in_p,                                           &
+            e_ant_out = e_ant_out_p,                                          &
+            e_bb_out  = e_bb_out_p,                                           &
+            e_bio_out = e_bio_out_p,                                          &
+            e_dust_out = e_dust_out_p,                                        &
+            e_ss_out   = e_ss_out_p,                                          &
+            e_vol_out  = e_vol_out_p,                                         &
 !--- Number of emissions in each array
-           num_e_ant_in    = num_e_ant_in,  num_e_bb_in    = num_e_bb_in,                &
-           num_e_ant_out   = num_e_ant_out, num_e_bb_out   = num_e_bb_out,               &
-           num_e_dust_out  = num_e_dust_out,                                             &
+            num_e_ant_in   = num_e_ant_in,                                    &
+            num_e_bb_in    = num_e_bb_in,                                     &
+            num_e_bio_in   = num_e_bio_in,                                    &
+            num_e_vol_in   = num_e_vol_in,                                    &
+            num_e_ant_out  = num_e_ant_out,                                   &
+            num_e_bb_out   = num_e_bb_out,                                    &
+            num_e_bio_out  = num_e_bio_out,                                   &
+            num_e_dust_out = num_e_dust_out,                                  &
+            num_e_ss_out   = num_e_ss_out,                                    &
+            num_e_vol_out  = num_e_vol_out,                                   &
 !--- Tracer indices
-           index_smoke_fine = index_smoke_fine,                                          &
-           index_dust_fine  = index_dust_fine,  index_dust_coarse  = index_dust_coarse,  &
-           index_unspc_fine = index_unspc_fine,                                          &
-! --- Emission (input) indices
-           index_e_bb_in_smoke_fine     = index_e_bb_in_smoke_fine,                      &
-           index_e_ant_in_unspc_fine    = index_e_ant_in_unspc_fine,                     &
-           index_e_ant_in_unspc_coarse  = index_e_ant_in_unspc_coarse,                   &
-! --- Emission (output) indices
-           index_e_bb_out_smoke_fine    = index_e_bb_out_smoke_fine,                     &
-           index_e_dust_out_dust_fine   = index_e_dust_out_dust_fine,                    &
-           index_e_dust_out_dust_coarse = index_e_dust_out_dust_coarse,                  &
-           index_e_ant_out_unspc_fine   = index_e_ant_out_unspc_fine,                    &
-           index_e_ant_out_unspc_coarse = index_e_ant_out_unspc_coarse,                  &
-! --- Wildfire related arrays
-           hwp            = hwp_p,                                                       &
-           hwp_method     = hwp_method,        hwp_alpha = hwp_alpha,                    &
-           frp_in         = frp_in_p,            frp_out = frp_out_p,                    &
-           fre_in         = fre_in_p,            fre_out = fre_out_p,                    &
-           totprcp_prev24 = totprcp_prev24_p,    hwp_avg = hwp_avg_p,                    &!JR
-           frp_avg        = frp_avg_p,           fre_avg = fre_avg_p,                    &!JR
-           fire_end_hr    = fire_end_hr_p,       eco_id  = eco_id_p,                     &!JR:as the avg blocks are calculated here
-           calc_bb_emis_online = calc_bb_emis_online,                                    &
-           efs_smold      = efs_smold_p,         efs_flam= efs_flam_p,                   &!JR
-           efs_rsmold     = efs_rsmold_p,        fmc_avg  = fmc_avg_p,                   &!JR
-           hfx_bb         = hfx_bb_p,             qfx_bb = qfx_bb_p,                     &
-           frac_grid_burned = frac_grid_burned_p,                                        &
-           min_bb_plume   = min_bb_plume_p, max_bb_plume = max_bb_plume_p,               &
-           coef_bb_dc     = coef_bb_dc_p, nblocks = nblocks,                             &
-! --- Dust related arrays
-           sandfrac_in    = sandfrac_in_p, clayfrac_in    = clayfrac_in_p,               &
-           uthres_in      = uthres_in_p,   uthres_sg_in   = uthres_sg_in_p,              &
-           albedo_drag_in = albedo_drag_p, feff_in        = feff_p, sep_in = sep_in_p,   &
-! --- Dry/Wet deposition, settling
-           wetdep_ls_opt = wetdep_ls_opt,         drydep_flux = drydep_flux_p,           &
-           tend_chem_settle = tend_chem_settle_p,       ddvel = ddvel_p,                 &
-           wetdep_resolved = wetdep_resolved_p,                                          &
-! --- Package activation
-           do_mpas_smoke = do_mpas_smoke, do_mpas_dust   = do_mpas_dust,                 &
-           do_mpas_anthro = do_mpas_anthro, do_mpas_rwc = do_mpas_rwc,                   &
-! --- Namelist: Wildfire
-           plume_wind_eff         = plume_wind_eff,  plume_alpha   = plume_alpha,        &
-           bb_emis_scale_factor   = bb_emis_scale_factor,                                &
-           bb_qv_scale_factor     = bb_qv_scale_factor,                                  &
-           ebb_dcycle             = ebb_dcycle,                                          &
-           add_fire_heat_flux  = add_fire_heat_flux,                                     &
-           add_fire_moist_flux = add_fire_moist_flux,                                    &
-           plumerisefire_frq   = plumerisefire_frq,                                      &
-           bb_beta = bb_beta,   bb_input_prevh = bb_input_prevh,                         &
-! --- Namelist: Dry/Wet deposition and settling
-           wetdep_ls_alpha        = wetdep_ls_alpha, plumerise_opt = plumerise_opt,      &
-           drydep_opt          = drydep_opt, pm_settling = pm_settling,                  &
-! --- Namelist: Dust
-           dust_alpha = dust_alpha, dust_gamma = dust_gamma,                             &
-           dust_drylimit_factor  = dust_drylimit_factor,                                 &
-           dust_moist_correction = dust_moist_correction,                                &
-! --- Namelist: Other
-           rwc_emis_scale_factor = rwc_emis_scale_factor,                                &
-! --- Met variables
-           ktau    = itimestep   , dt       = dt_dyn     , dxcell   = dx_p       ,       &
-           area    = area_p      ,                                                       &
-           xland   = xland_p     , u10      = u10_p      , v10      = v10_p      ,       &
-           ust     = ust_p       , xlat     = xlat_p     , xlong    = xlon_p     ,       &
-           tskin   = tsk_p       , pblh     = hpbl_p     , t2m      = t2m_p      ,       &
-           p8w     = pres2_hyd_p , dz8w     = dz_p       , z_at_w   = zgrid_p    ,       &
-           p_phy   = pres_hyd_p  , t_phy    = t_p        , u_phy    = u_p        ,       &
-           v_phy   = v_p         , qv       = qv_p       , vvel     = w_p        ,       &
-           qc_vis  = qc_p, qr_vis = qr_p, qi_vis = qi_p, qs_vis = qs_p, qg_vis = qg_p,   &
-           blcldw_vis = qcbl_p, blcldi_vis = qibl_p,                                     &
-           coszen = coszr_p,                                                             &
-           aod3d_smoke = aod3d_smoke_p, aod3d = aod3d_p, vis    = vis_p          ,       &
-           pi_phy  = pi_p        , rho_phy  = rho_p      , kpbl     = kpbl_p     ,       &
-           nsoil   = num_soils   , smois    = smois_p    , tslb     = tslb_p     ,       &
-           ivgtyp  = ivgtyp_p    , isltyp   = isltyp_p   , nlcat    = num_landcat,       &
-           swdown  = swdown_p    , z0       = z0_p       , snowh    = snowh_p    ,       &
-           julian  = curr_julday , rmol     = rmol_p     , raincv   = raincv_p   ,       &
-           rainncv = rainncv_p   , dpt2m    = dpt2m_p    , znt      = znt_p      ,       &                              
-           mavail  = mavail_p    , g        = gravity    , vegfra   = vegfra_p   ,       &
-           landusef = landusef_p , cldfrac  = cldfrac_p  , ktop_deep= ktop_deep_p,       &
-           cp      = cp          , rd       = R_d        , gmt      = gmt        ,       &
-           ids = ids , ide = ide , jds = jds , jde = jde , kds = kds , kde = kde ,       &
-           ims = ims , ime = ime , jms = jms , jme = jme , kms = kds , kme = kme ,       &
-           its = its , ite = ite , jts = jts , jte = jte , kts = kts , kte = kte         )
+            config_extra_chemical_tracers = config_extra_chemical_tracers,    &
+            config_ultrafine = config_ultrafine,                              &
+            config_coarse = config_coarse,                                    &
+            index_smoke_ultrafine = index_smoke_ultrafine,                    &
+            index_dust_ultrafine = index_dust_ultrafine,                      &
+            index_unspc_ultrafine = index_unspc_ultrafine,                    &
+            index_co = index_co,                                              &
+            index_nox = index_nox,                                            &
+            index_smoke_fine = index_smoke_fine,                              &
+            index_smoke_coarse = index_smoke_coarse,                          &
+            index_soa = index_soa,                                            &
+            index_bbsoa = index_bbsoa,                                        &
+            index_antsoa = index_antsoa,                                      &
+            index_bbvoc = index_bbvoc,                                        &
+            index_antvoc = index_antvoc,                                      &
+            config_soa_scheme = config_soa_scheme,                            &
+            index_dust_fine = index_dust_fine,                                &
+            index_dust_coarse = index_dust_coarse,                            &
+            index_ssalt_fine = index_ssalt_fine,                              &
+            index_ssalt_coarse = index_ssalt_coarse,                          &
+            index_polp_tree = index_polp_tree,                                &
+            index_polp_grass = index_polp_grass,                              &
+            index_polp_weed = index_polp_weed,                                &
+            index_polp_all = index_polp_all,                                  &
+            index_pols_all = index_pols_all,                                  &
+            index_pols_tree = index_pols_tree,                                &
+            index_pols_grass = index_pols_grass,                              &
+            index_pols_weed = index_pols_weed,                                &
+            index_unspc_fine = index_unspc_fine,                              &
+            index_unspc_coarse = index_unspc_coarse,                          &
+            index_so4_a_fine = index_so4_a_fine,                              &
+            index_no3_a_fine = index_no3_a_fine,                              &
+            index_nh4_a_fine = index_nh4_a_fine,                              &
+            index_so2 = index_so2,                                            &
+            index_nh3 = index_nh3,                                            &
+            index_ch4 = index_ch4,                                            &
+            index_bact_fine = index_bact_fine,                                &
+!--- Emission input indices
+            index_e_bb_in_smoke_ultrafine = index_e_bb_in_smoke_ultrafine,    &
+            index_e_bb_in_smoke_fine = index_e_bb_in_smoke_fine,              &
+            index_e_bb_in_smoke_coarse = index_e_bb_in_smoke_coarse,          &
+            index_e_bb_in_ch4 = index_e_bb_in_ch4,                            &
+            index_e_bb_in_nox = index_e_bb_in_nox,                            &
+            index_e_bb_in_so2 = index_e_bb_in_so2,                            &
+            index_e_bb_in_nh3 = index_e_bb_in_nh3,                            &
+            index_e_bb_in_co  = index_e_bb_in_co,                             &
+            index_e_ant_in_unspc_ultrafine = index_e_ant_in_unspc_ultrafine,  &
+            index_e_ant_in_unspc_fine = index_e_ant_in_unspc_fine,            &
+            index_e_ant_in_unspc_coarse = index_e_ant_in_unspc_coarse,        &
+            index_e_ant_in_smoke_ultrafine = index_e_ant_in_smoke_ultrafine,  &
+            index_e_ant_in_smoke_fine = index_e_ant_in_smoke_fine,            &
+            index_e_ant_in_smoke_coarse = index_e_ant_in_smoke_coarse,        &
+            index_e_ant_in_no3_a_fine = index_e_ant_in_no3_a_fine,            &
+            index_e_ant_in_so4_a_fine = index_e_ant_in_so4_a_fine,            &
+            index_e_ant_in_nh4_a_fine = index_e_ant_in_nh4_a_fine,            &
+            index_e_ant_in_nh3 = index_e_ant_in_nh3,                          &
+            index_e_ant_in_so2 = index_e_ant_in_so2,                          &
+            index_e_ant_in_ch4 = index_e_ant_in_ch4,                          &
+            index_e_ant_in_nox = index_e_ant_in_nox,                          &
+            index_e_ant_in_co  = index_e_ant_in_co,                           &
+            index_e_bio_in_polp_tree = index_e_bio_in_polp_tree,              &
+            index_e_bio_in_polp_grass = index_e_bio_in_polp_grass,            &
+            index_e_bio_in_polp_weed = index_e_bio_in_polp_weed,              &
+            index_e_vol_in_vash_fine = index_e_vol_in_vash_fine,              &
+            index_e_vol_in_vash_coarse = index_e_vol_in_vash_coarse,          &
+!--- Emission output indices
+            index_e_bb_out_smoke_ultrafine = index_e_bb_out_smoke_ultrafine,  &
+            index_e_bb_out_smoke_fine = index_e_bb_out_smoke_fine,            &
+            index_e_bb_out_smoke_coarse = index_e_bb_out_smoke_coarse,        &
+            index_e_bb_out_ch4 = index_e_bb_out_ch4,                          &
+            index_e_bb_out_nox = index_e_bb_out_nox,                          &
+            index_e_bb_out_so2 = index_e_bb_out_so2,                          &
+            index_e_bb_out_nh3 = index_e_bb_out_nh3,                          &
+            index_e_bb_out_co  = index_e_bb_out_co,                           &
+            index_e_ant_out_unspc_ultrafine = index_e_ant_out_unspc_ultrafine,&
+            index_e_ant_out_unspc_fine = index_e_ant_out_unspc_fine,          &
+            index_e_ant_out_unspc_coarse = index_e_ant_out_unspc_coarse,      &
+            index_e_ant_out_smoke_ultrafine = index_e_ant_out_smoke_ultrafine,&
+            index_e_ant_out_smoke_fine = index_e_ant_out_smoke_fine,          &
+            index_e_ant_out_smoke_coarse = index_e_ant_out_smoke_coarse,      &
+            index_e_ant_out_no3_a_fine = index_e_ant_out_no3_a_fine,          &
+            index_e_ant_out_so4_a_fine = index_e_ant_out_so4_a_fine,          &
+            index_e_ant_out_nh4_a_fine = index_e_ant_out_nh4_a_fine,          &
+            index_e_ant_out_nh3 = index_e_ant_out_nh3,                        &
+            index_e_ant_out_so2 = index_e_ant_out_so2,                        &
+            index_e_ant_out_ch4 = index_e_ant_out_ch4,                        &
+            index_e_ant_out_nox = index_e_ant_out_nox,                        &
+            index_e_ant_out_co  = index_e_ant_out_co,                         &
+            index_e_bio_out_polp_tree = index_e_bio_out_polp_tree,            &
+            index_e_bio_out_polp_grass = index_e_bio_out_polp_grass,          &
+            index_e_bio_out_polp_weed = index_e_bio_out_polp_weed,            &
+            index_e_dust_out_dust_ultrafine = index_e_dust_out_dust_ultrafine,&
+            index_e_dust_out_dust_fine = index_e_dust_out_dust_fine,          &
+            index_e_dust_out_dust_coarse = index_e_dust_out_dust_coarse,      &
+            index_e_ss_out_ssalt_fine = index_e_ss_out_ssalt_fine,            &
+            index_e_ss_out_ssalt_coarse = index_e_ss_out_ssalt_coarse,        &
+            index_e_vol_out_vash_fine = index_e_vol_out_vash_fine,            &
+            index_e_vol_out_vash_coarse = index_e_vol_out_vash_coarse,        &
+!--- Wildfire related arrays
+            hwp = hwp_p,                                                      &
+            hwp_method = hwp_method,                                          &
+            hwp_alpha = hwp_alpha,                                            &
+            frp_in = frp_in_p,                                                &
+            frp_out = frp_out_p,                                              &
+            fre_in = fre_in_p,                                                &
+            fre_out = fre_out_p,                                              &
+            totprcp_prev24 = totprcp_prev24_p,                                &
+            hwp_avg = hwp_avg_p,                                              &
+            frp_avg = frp_avg_p,                                              &
+            fre_avg = fre_avg_p,                                              &
+            fire_end_hr = fire_end_hr_p,                                      &
+            coef_bb_dc = coef_bb_dc_p,                                        &
+            nblocks = nblocks,                                                &
+            eco_id = ecoregion_ID_p,                                          &
+            calc_bb_emis_online = calc_bb_emis_online,                        &
+            efs_smold = efs_smold_p,                                          &
+            efs_flam = efs_flam_p,                                            &
+            efs_rsmold = efs_rsmold_p,                                        &
+            fmc_avg = fmc_avg_p,                                              &
+            hfx_bb = hfx_bb_p,                                                &
+            qfx_bb = qfx_bb_p,                                                &
+            frac_grid_burned = frac_grid_burned_p,                            &
+            min_bb_plume = min_bb_plume_p,                                    &
+            max_bb_plume = max_bb_plume_p,                                    &
+            max_rwc_plume = max_rwc_plume_p,                                  &
+!--- Residential Wood Combustion related arrays
+            RWC_denominator = RWC_denominator_p,                              &
+            RWC_annual_sum = RWC_annual_sum_p,                                &
+            RWC_annual_sum_smoke_fine = RWC_annual_sum_smoke_fine_p,          &
+            RWC_annual_sum_smoke_coarse = RWC_annual_sum_smoke_coarse_p,      &
+            RWC_annual_sum_unspc_fine = RWC_annual_sum_unspc_fine_p,          &
+            RWC_annual_sum_unspc_coarse = RWC_annual_sum_unspc_coarse_p,      &
+!--- Dust related arrays
+            sandfrac_in = sandfrac_in_p,                                      &
+            clayfrac_in = clayfrac_in_p,                                      &
+            uthres_in = uthres_in_p,                                          &
+            rdrag_in = rdrag_p,                                               &
+            ssm_in = ssm_in_p,                                                &
+!--- Dry/Wet deposition, settling
+            wetdep_ls_opt = wetdep_ls_opt,                                    &
+            drydep_flux = drydep_flux_p,                                      &
+            tend_chem_settle = tend_chem_settle_p,                            &
+            ddvel = ddvel_p,                                                  &
+            wetdep_resolved = wetdep_resolved_p,                              &
+!--- Package activation
+            do_mpas_smoke = do_mpas_smoke,                                    &
+            do_mpas_dust = do_mpas_dust,                                      &
+            do_mpas_pollen = do_mpas_pollen,                                  &
+            do_mpas_anthro = do_mpas_anthro,                                  &
+            do_mpas_ssalt = do_mpas_ssalt,                                    &
+            do_mpas_volc = do_mpas_volc,                                      &
+            do_mpas_sna = do_mpas_sna,                                        &
+            do_mpas_soa = do_mpas_soa,                                        &
+            do_mpas_methane = do_mpas_methane,                                &
+            do_mpas_hab = do_mpas_hab,                                        &
+            do_mpas_rwc = do_mpas_rwc,                                        &
+!--- Namelist wildfire
+            plume_wind_eff = plume_wind_eff,                                  &
+            plume_alpha = plume_alpha,                                        &
+            bb_emis_scale_factor = bb_emis_scale_factor,                      &
+            bb_qv_scale_factor = bb_qv_scale_factor,                          &
+            ebb_dcycle = ebb_dcycle,                                          &
+            add_fire_heat_flux = add_fire_heat_flux,                          &
+            add_fire_moist_flux = add_fire_moist_flux,                        &
+            plumerisefire_frq = plumerisefire_frq,                            &
+            bb_beta = bb_beta,                                                &
+            bb_input_prevh = bb_input_prevh,                                  &
+!--- Namelist pollen
+            pollen_emis_scale_factor = pollen_emis_scale_factor,              &
+            tree_pollen_emis_scale_factor = tree_pollen_emis_scale_factor,    &
+            grass_pollen_emis_scale_factor = grass_pollen_emis_scale_factor,  &
+            weed_pollen_emis_scale_factor = weed_pollen_emis_scale_factor,    &
+            num_pols_per_polp = num_pols_per_polp,                            &
+!--- Namelist dry/wet deposition and settling
+            wetdep_ls_alpha = wetdep_ls_alpha,                                &
+            plumerise_opt = plumerise_opt,                                    &
+            drydep_opt = drydep_opt,                                          &
+            pm_settling = pm_settling,                                        &
+!--- Namelist dust
+            dust_alpha = dust_alpha,                                          &
+            dust_gamma = dust_gamma,                                          &
+            dust_drylimit_factor = dust_drylimit_factor,                      &
+            dust_moist_correction = dust_moist_correction,                    &
+!--- Namelist other
+            rwc_emis_scale_factor = rwc_emis_scale_factor,                    &
+            plumerise_opt_rwc = plumerise_opt_rwc,                            &
+            anthro_emis_scale_factor = anthro_emis_scale_factor,              &
+            anthro_pt_emis_scale_factor = anthro_pt_emis_scale_factor,        &
+!--- Met variables
+            nifa = nifa_p,                                                    &
+            nwfa = nwfa_p,                                                    &
+            ktau = itimestep,                                                 &
+            dt = dt_dyn,                                                      &
+            dxcell = dx_p,                                                    &
+            area = area_p,                                                    &
+            xland = xland_p,                                                  &
+            u10 = u10_p,                                                      &
+            v10 = v10_p,                                                      &
+            ust = ust_p,                                                      &
+            xlat = xlat_p,                                                    &
+            xlong = xlon_p,                                                   &
+            tskin = tsk_p,                                                    &
+            pblh = hpbl_p,                                                    &
+            t2m = t2m_p,                                                      &
+            p8w = pres2_hyd_p,                                                &
+            dz8w = dz_p,                                                      &
+            z_at_w = zgrid_p,                                                 &
+            p_phy = pres_hyd_p,                                               &
+            t_phy = t_p,                                                      &
+            u_phy = u_p,                                                      &
+            v_phy = v_p,                                                      &
+            qv = qv_p,                                                        &
+            vvel = w_p,                                                       &
+            qc_vis = qc_p,                                                    &
+            qr_vis = qr_p,                                                    &
+            qi_vis = qi_p,                                                    &
+            qs_vis = qs_p,                                                    &
+            qg_vis = qg_p,                                                    &
+            blcldw_vis = qcbl_p,                                              &
+            blcldi_vis = qibl_p,                                              &
+            coszen = coszr_p,                                                 &
+            config_mie_aod_opt = config_mie_aod_opt,                          &
+            aod3d_smoke = aod3d_smoke_p,                                      &
+            aod3d = aod3d_p,                                                  &
+            aod3d_simple = aod3d_simple_p,                                    &
+            tauaer_lw_p = tauaer_lw_p,                                        &
+            tauaer_sw_p = tauaer_sw_p,                                        &
+            ssaaer_sw_p = ssaaer_sw_p,                                        &
+            asyaer_sw_p = asyaer_sw_p,                                        &
+            vis = vis_p,                                                      &
+            pi_phy = pi_p,                                                    &
+            rho_phy = rho_p,                                                  &
+            kpbl = kpbl_p,                                                    &
+            nsoil = num_soils,                                                &
+            smois = smois_p,                                                  &
+            tslb = tslb_p,                                                    &
+            ivgtyp = ivgtyp_p,                                                &
+            isltyp = isltyp_p,                                                &
+            nlcat = num_landcat,                                              &
+            swdown = swdown_p,                                                &
+            z0 = z0_p,                                                        &
+            snowh = snowh_p,                                                  &
+            julian = curr_julday,                                             &
+            rmol = rmol_p,                                                    &
+            raincv = raincv_p,                                                &
+            rainncv = rainncv_p,                                              &
+            dpt2m = dpt2m_p,                                                  &
+            znt = znt_p,                                                      &
+            mavail = mavail_p,                                                &
+            g = gravity,                                                      &
+            vegfra = vegfra_p,                                                &
+            landusef = landusef_p,                                            &
+            cldfrac = cldfrac_p,                                              &
+            ktop_deep = ktop_deep_p,                                          &
+            cp = cp,                                                          &
+            rd = R_d,                                                         &
+            gmt = gmt,                                                        &
+            ids = ids, ide = ide,                                             &
+            jds = jds, jde = jde,                                             &
+            kds = kds, kde = kde,                                             &
+            ims = ims, ime = ime,                                             &
+            jms = jms, jme = jme,                                             &
+            kms = kds, kme = kme,                                             &
+            its = its, ite = ite,                                             &
+            jts = jts, jte = jte,                                             &
+            kts = kts, kte = kte                                              )
  call mpas_timer_stop('mpas_smoke')
  
- ! Update PM2.5/PM10
+! Update PM2.5/PM10
+ do j = jts, jte
+ do k = kts, kte
+ do i = its, ite
  
- do j = jts,jte
- do k = kts,kte
- do i = its,ite
-    PM2_5_p(i,k,j) = 0.0_RKIND
-       if (index_smoke_fine .gt. 0)  PM2_5_p(i,k,j) = PM2_5_p(i,k,j) + chem_p(i,k,j,index_smoke_fine - chemistry_start + 1)
-       if (index_dust_fine  .gt. 0)  PM2_5_p(i,k,j) = PM2_5_p(i,k,j) + chem_p(i,k,j,index_dust_fine  - chemistry_start + 1)
-       if (index_unspc_fine .gt. 0)  PM2_5_p(i,k,j) = PM2_5_p(i,k,j) + chem_p(i,k,j,index_unspc_fine - chemistry_start + 1)
-    PM2_5_p(i,k,j) = PM2_5_p(i,k,j) * rho_p(i,k,j)
+   PM2_5_p(i,k,j)           = 0.0_RKIND
+   PM2_5_SOA_p(i,k,j)       = 0.0_RKIND
+   PM2_5_SMOKE_SOA_p(i,k,j) = 0.0_RKIND
+   PM2_5_ANT_SOA_p(i,k,j)   = 0.0_RKIND
+   PM10_p(i,k,j)            = 0.0_RKIND
+ 
+   if (index_smoke_fine .gt. 0) PM2_5_p(i,k,j) = PM2_5_p(i,k,j) + chem_p(i,k,j,index_smoke_fine - chemistry_start + 1)
+   if (index_dust_fine  .gt. 0) PM2_5_p(i,k,j) = PM2_5_p(i,k,j) + chem_p(i,k,j,index_dust_fine  - chemistry_start + 1)
+   if (index_unspc_fine .gt. 0) PM2_5_p(i,k,j) = PM2_5_p(i,k,j) + chem_p(i,k,j,index_unspc_fine - chemistry_start + 1)
+   if (index_ssalt_fine .gt. 0) PM2_5_p(i,k,j) = PM2_5_p(i,k,j) + chem_p(i,k,j,index_ssalt_fine - chemistry_start + 1)
+   if (index_pols_all   .gt. 0) PM2_5_p(i,k,j) = PM2_5_p(i,k,j) + chem_p(i,k,j,index_pols_all   - chemistry_start + 1)
+   if (index_pols_tree  .gt. 0) PM2_5_p(i,k,j) = PM2_5_p(i,k,j) + chem_p(i,k,j,index_pols_tree  - chemistry_start + 1)
+   if (index_pols_grass .gt. 0) PM2_5_p(i,k,j) = PM2_5_p(i,k,j) + chem_p(i,k,j,index_pols_grass - chemistry_start + 1)
+   if (index_pols_weed  .gt. 0) PM2_5_p(i,k,j) = PM2_5_p(i,k,j) + chem_p(i,k,j,index_pols_weed  - chemistry_start + 1)
+   if (index_no3_a_fine .gt. 0) PM2_5_p(i,k,j) = PM2_5_p(i,k,j) + chem_p(i,k,j,index_no3_a_fine - chemistry_start + 1)
+   if (index_so4_a_fine .gt. 0) PM2_5_p(i,k,j) = PM2_5_p(i,k,j) + chem_p(i,k,j,index_so4_a_fine - chemistry_start + 1)
+   if (index_nh4_a_fine .gt. 0) PM2_5_p(i,k,j) = PM2_5_p(i,k,j) + chem_p(i,k,j,index_nh4_a_fine - chemistry_start + 1)
+ 
+   select case (config_soa_scheme)
+ 
+   case (1)
+ 
+      if (index_soa .gt. 0) then
+         PM2_5_SOA_p(i,k,j) = chem_p(i,k,j,index_soa - chemistry_start + 1)
+      endif
+ 
+   case (2)
+ 
+      if (index_bbsoa .gt. 0) then
+         PM2_5_SMOKE_SOA_p(i,k,j) = chem_p(i,k,j,index_bbsoa - chemistry_start + 1)
+      endif
+ 
+      if (index_antsoa .gt. 0) then
+         PM2_5_ANT_SOA_p(i,k,j) = chem_p(i,k,j,index_antsoa - chemistry_start + 1)
+      endif
+ 
+      PM2_5_SOA_p(i,k,j) = PM2_5_SMOKE_SOA_p(i,k,j) + PM2_5_ANT_SOA_p(i,k,j)
+ 
+   case default
+ 
+      PM2_5_SOA_p(i,k,j)       = 0.0_RKIND
+      PM2_5_SMOKE_SOA_p(i,k,j) = 0.0_RKIND
+      PM2_5_ANT_SOA_p(i,k,j)   = 0.0_RKIND
+ 
+   end select
+ 
+   PM2_5_p(i,k,j) = PM2_5_p(i,k,j) + PM2_5_SOA_p(i,k,j)
+ 
+   PM2_5_p(i,k,j)           = PM2_5_p(i,k,j)           * rho_p(i,k,j)
+   PM2_5_SOA_p(i,k,j)       = PM2_5_SOA_p(i,k,j)       * rho_p(i,k,j)
+   PM2_5_SMOKE_SOA_p(i,k,j) = PM2_5_SMOKE_SOA_p(i,k,j) * rho_p(i,k,j)
+   PM2_5_ANT_SOA_p(i,k,j)   = PM2_5_ANT_SOA_p(i,k,j)   * rho_p(i,k,j)
+ 
+   if (index_smoke_coarse .gt. 0) PM10_p(i,k,j) = PM10_p(i,k,j) + chem_p(i,k,j,index_smoke_coarse - chemistry_start + 1)
+   if (index_dust_coarse .gt.  0) PM10_p(i,k,j) = PM10_p(i,k,j) + chem_p(i,k,j,index_dust_coarse  - chemistry_start + 1)
+   if (index_unspc_coarse .gt. 0) PM10_p(i,k,j) = PM10_p(i,k,j) + chem_p(i,k,j,index_unspc_coarse - chemistry_start + 1) 
+   if (index_ssalt_coarse .gt. 0) PM10_p(i,k,j) = PM10_p(i,k,j) + chem_p(i,k,j,index_ssalt_coarse - chemistry_start + 1)
+   if (index_polp_all .gt.     0) PM10_p(i,k,j) = PM10_p(i,k,j) + chem_p(i,k,j,index_polp_all    - chemistry_start + 1) 
+   if (index_polp_tree .gt.    0) PM10_p(i,k,j) = PM10_p(i,k,j) + chem_p(i,k,j,index_polp_tree    - chemistry_start + 1) 
+   if (index_polp_grass .gt.   0) PM10_p(i,k,j) = PM10_p(i,k,j) + chem_p(i,k,j,index_polp_grass   - chemistry_start + 1)
+   if (index_polp_weed .gt.    0) PM10_p(i,k,j) = PM10_p(i,k,j) + chem_p(i,k,j,index_polp_weed   - chemistry_start + 1)
 
-    PM10_p(i,k,j) =  0.0_RKIND
-     !if (index_smoke_coarse .gt. 0) PM10_p(i,k,j) = PM10_p(i,k,j) + chem_p(i,k,j,index_smoke_coarse - chemistry_start + 1)
-      if (index_dust_coarse .gt.  0) PM10_p(i,k,j) = PM10_p(i,k,j) + chem_p(i,k,j,index_dust_coarse  - chemistry_start + 1)
-    PM10_p(i,k,j) = PM10_p(i,k,j) *  rho_p(i,k,j)
+   PM10_p(i,k,j) = PM10_p(i,k,j) *  rho_p(i,k,j)
+
  enddo
  enddo
  enddo
@@ -1277,17 +2387,69 @@
  do j = jts,jte
  do i = its,ite
     aod550_p(i,j) = 0.0_RKIND
+    aod550_simple_p(i,j) = 0.0_RKIND
  enddo
  enddo
 
  do j = jts,jte
  do k = kts,kte
  do i = its,ite
-    aod550_p(i,j) = aod550_p(i,j) + aod3d_p(i,k,j) * dz_p(i,k,j) / 1000._RKIND
+!    aod550_p(i,j) = aod550_p(i,j) + aod3d_p(i,k,j) * dz_p(i,k,j) / 1000._RKIND
+    aod550_p(i,j) = aod550_p(i,j) + aod3d_p(i,k,j)
+    aod550_simple_p(i,j) = aod550_simple_p(i,j) + aod3d_simple_p(i,k,j)
  enddo
  enddo
  enddo
 
+! --------------------------------------------------------------------------------------
+ idx_300 = 1
+ idx_400 = 2
+ idx_600 = 3
+ idx_999 = 4
+ k_end = min(kte, ubound(tauaer_sw, 2))
+
+ if ( aero_dir_rad_fdb .eq. 2 .or. aero_dir_rad_fdb .eq. 4 ) then
+ do j = jts,jte
+   do i = its,ite
+     do k = kts,k_end !k_end declared here only in this subroutine
+       do n = 1, 16
+         tauaer_lw(n,k,i) = 0.0_RKIND 
+       enddo
+
+       do n = 1, 14
+         tauaer_sw(n,k,i) = 0.0_RKIND
+         ssaaer_sw(n,k,i) = 1.0_RKIND
+         asyaer_sw(n,k,i) = 0.0_RKIND
+       enddo
+       
+       if (tauaer_sw_p(i,k,j,idx_300) > thresh .and. tauaer_sw_p(i,k,j,idx_999) > thresh) then
+          ang = log(tauaer_sw_p(i,k,j,idx_300) / tauaer_sw_p(i,k,j,idx_999)) / &
+                log(src_wav(idx_999) / src_wav(idx_300))
+       else
+          ang = 1.0_RKIND
+       endif
+       
+       do n = 1, 14
+         tauaer_sw(n,k,i) = tauaer_sw_p(i,k,j,idx_400) * &
+                            (src_wav(idx_400) / dst_wav(n))**ang
+         slope = (ssaaer_sw_p(i,k,j,idx_600) - ssaaer_sw_p(i,k,j,idx_400)) / &
+                 (src_wav(idx_600) - src_wav(idx_400))
+         ssaaer_sw(n,k,i) = slope * (dst_wav(n) - src_wav(idx_600)) + ssaaer_sw_p(i,k,j,idx_600)
+         ssaaer_sw(n,k,i) = max(0.4_RKIND, min(1.0_RKIND, ssaaer_sw(n,k,i)))
+       
+         slope = (asyaer_sw_p(i,k,j,idx_600) - asyaer_sw_p(i,k,j,idx_400)) / &
+                 (src_wav(idx_600) - src_wav(idx_400))
+         asyaer_sw(n,k,i) = slope * (dst_wav(n) - src_wav(idx_600)) + asyaer_sw_p(i,k,j,idx_600)
+         asyaer_sw(n,k,i) = max(0.0_RKIND, min(1.0_RKIND, asyaer_sw(n,k,i)))
+       enddo
+       do n = 1, 16
+         tauaer_lw(n,k,i) = tauaer_lw_p(i,k,j,n)
+       enddo
+     enddo
+   enddo
+ enddo
+ endif
+! --------------------------------------------------------------------------------------
 
 !copy local arrays to MPAS grid:
  call smoke_to_MPAS(configs,time_lev,state,diag_physics,tend_physics,its,ite)
