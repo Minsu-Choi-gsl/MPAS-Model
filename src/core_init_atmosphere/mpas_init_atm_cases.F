@@ -4161,6 +4161,7 @@ module init_atm_cases
 
       real(kind=RKIND), dimension(:), pointer :: hs, hs1, sm0
       real(kind=RKIND) :: hm, hm_global, zh, dzmin, dzmina, dzminf, dzminf_global, sm
+      real(kind=RKIND) :: coordinate_smoothing_height
       real(kind=RKIND) :: dcsum
       integer :: nsmterrain, kz, sfc_k
       logical :: hybrid, smooth
@@ -4210,6 +4211,7 @@ module init_atm_cases
       real (kind=RKIND), pointer :: config_ztop
       logical, pointer :: config_hybrid_coordinate
       real (kind=RKIND), pointer :: config_hybrid_top_z
+      real (kind=RKIND), pointer :: config_coordinate_smoothing_height
       logical, pointer :: config_tc_vertical_grid
       character (len=StrKIND), pointer :: config_specified_zeta_levels
       logical, pointer :: config_use_spechumd
@@ -4288,6 +4290,11 @@ module init_atm_cases
       real (kind=RKIND), dimension(:), pointer :: soilz
 ! Chemistry
       real (kind=RKIND), dimension(:,:), pointer :: smoke_fine_fg
+      real (kind=RKIND), dimension(:,:), pointer :: sulphate_fg
+      real (kind=RKIND), dimension(:,:), pointer :: om_ho_fg
+      real (kind=RKIND), dimension(:,:), pointer :: om_hi_fg
+      real (kind=RKIND), dimension(:,:), pointer :: bc_ho_fg
+      real (kind=RKIND), dimension(:,:), pointer :: bc_hi_fg
       real (kind=RKIND), dimension(:,:), pointer :: dust_fine_fg
       real (kind=RKIND), dimension(:,:), pointer :: dust_coarse_fg
       real (kind=RKIND), dimension(:,:), pointer :: dust1_fg
@@ -4326,6 +4333,7 @@ module init_atm_cases
       call mpas_pool_get_config(configs, 'config_ztop', config_ztop)
       call mpas_pool_get_config(configs, 'config_hybrid_coordinate', config_hybrid_coordinate)
       call mpas_pool_get_config(configs, 'config_hybrid_top_z', config_hybrid_top_z)
+      call mpas_pool_get_config(configs, 'config_coordinate_smoothing_height', config_coordinate_smoothing_height)
       call mpas_pool_get_config(configs, 'config_tc_vertical_grid', config_tc_vertical_grid)
       call mpas_pool_get_config(configs, 'config_specified_zeta_levels', config_specified_zeta_levels)
       call mpas_pool_get_config(configs, 'config_use_spechumd', config_use_spechumd)
@@ -4351,6 +4359,8 @@ module init_atm_cases
          extrap_airtemp = 1
       else if (trim(config_extrap_airtemp) == 'lapse-rate') then
          extrap_airtemp = 2
+      else if (trim(config_extrap_airtemp) == 'gfs') then
+         extrap_airtemp = 3
       else
           call mpas_log_write('*************************************************************', messageType=MPAS_LOG_ERR)
           call mpas_log_write('* Invalid value for namelist variable config_extrap_airtemp *', messageType=MPAS_LOG_ERR)
@@ -4466,6 +4476,11 @@ module init_atm_cases
 ! Chemistry
       if ( config_smoke_scheme .ne. 'off' ) then
          call mpas_pool_get_array(fg, 'smoke_fine', smoke_fine_fg)
+         call mpas_pool_get_array(fg, 'sulphate', sulphate_fg)
+         call mpas_pool_get_array(fg, 'om_ho', om_ho_fg)
+         call mpas_pool_get_array(fg, 'om_hi', om_hi_fg)
+         call mpas_pool_get_array(fg, 'bc_ho', bc_ho_fg)
+         call mpas_pool_get_array(fg, 'bc_hi', bc_hi_fg)
       endif
       if ( config_dust_scheme .ne. 'off' ) then
          call mpas_pool_get_array(fg, 'dust_fine', dust_fine_fg)
@@ -4802,9 +4817,18 @@ module init_atm_cases
 
       if (smooth) then
 
+         if (config_coordinate_smoothing_height == 0.0_RKIND) then
+            coordinate_smoothing_height = zh
+         else if (config_coordinate_smoothing_height > 0.0_RKIND) then
+            coordinate_smoothing_height = config_coordinate_smoothing_height
+         else
+            call mpas_log_write('config_coordinate_smoothing_height must be zero or positive.', messageType=MPAS_LOG_CRIT)
+         end if
+
          call mpas_log_write(' ')
          call mpas_log_write(' surfaces will be smoothed, dzmin = $r ',realArgs=(/config_dzmin/))
          call mpas_log_write(' base number of smoothing passes = $i ',intArgs=(/config_nsm/))
+         call mpas_log_write(' coordinate smoothing height (m) = $r ',realArgs=(/coordinate_smoothing_height/))
          call mpas_log_write(' ')
          call mpas_log_write(' level, smoothing steps, smoothing factor, smallest fractional dz ')
 
@@ -4828,7 +4852,7 @@ module init_atm_cases
             do i=1,config_nsm + k
                do iCell=1,nCells
 
-                  sm = sm0(iCell) * min((3.0*zw(k)/zh)**2.0, 1.0_RKIND)
+                  sm = sm0(iCell) * min((3.0*zw(k)/coordinate_smoothing_height)**2.0, 1.0_RKIND)
 
                   hs1(iCell) = 0.
                   do j = 1,nEdgesOnCell(iCell)
@@ -5161,6 +5185,11 @@ module init_atm_cases
              trim(field % field) == 'SKINTEMP' .or. &
 ! Chemistry
              trim(field % field) == 'SMKF' .or. &
+             trim(field % field) == 'SULPH' .or. &
+             trim(field % field) == 'OMHO' .or. &
+             trim(field % field) == 'OMHI' .or. &
+             trim(field % field) == 'BCHO' .or. &
+             trim(field % field) == 'BCHI' .or. &
              trim(field % field) == 'UNSF' .or. &
              trim(field % field) == 'UNSC' .or. &
              trim(field % field) == 'DSTF' .or. &
@@ -5474,6 +5503,51 @@ module init_atm_cases
                 latPoints => latCell
                 lonPoints => lonCell
                 call mpas_pool_get_array(fg, 'smoke_coarse', destField2d)
+                ndims = 2
+              endif
+            else if (trim(field % field) == 'SULPH' ) then
+              if ( config_smoke_scheme .ne. 'off' ) then
+                call mpas_log_write('Interpolating SULPH at $i $r', intArgs=(/k/), realArgs=(/vert_level(k)/))
+                nInterpPoints = nCells
+                latPoints => latCell
+                lonPoints => lonCell
+                call mpas_pool_get_array(fg, 'sulphate', destField2d)
+                ndims = 2
+              endif
+            else if (trim(field % field) == 'OMHO' ) then
+              if ( config_smoke_scheme .ne. 'off' ) then
+                call mpas_log_write('Interpolating OMHO at $i $r', intArgs=(/k/), realArgs=(/vert_level(k)/))
+                nInterpPoints = nCells
+                latPoints => latCell
+                lonPoints => lonCell
+                call mpas_pool_get_array(fg, 'om_ho', destField2d)
+                ndims = 2
+              endif
+            else if (trim(field % field) == 'OMHI' ) then
+              if ( config_smoke_scheme .ne. 'off' ) then
+                call mpas_log_write('Interpolating OMHI at $i $r', intArgs=(/k/), realArgs=(/vert_level(k)/))
+                nInterpPoints = nCells
+                latPoints => latCell
+                lonPoints => lonCell
+                call mpas_pool_get_array(fg, 'om_hi', destField2d)
+                ndims = 2
+              endif
+            else if (trim(field % field) == 'BCHO' ) then
+              if ( config_smoke_scheme .ne. 'off' ) then
+                call mpas_log_write('Interpolating BCHO at $i $r', intArgs=(/k/), realArgs=(/vert_level(k)/))
+                nInterpPoints = nCells
+                latPoints => latCell
+                lonPoints => lonCell
+                call mpas_pool_get_array(fg, 'bc_ho', destField2d)
+                ndims = 2
+              endif
+            else if (trim(field % field) == 'BCHI' ) then
+              if ( config_smoke_scheme .ne. 'off' ) then
+                call mpas_log_write('Interpolating BCHI at $i $r', intArgs=(/k/), realArgs=(/vert_level(k)/))
+                nInterpPoints = nCells
+                latPoints => latCell
+                lonPoints => lonCell
+                call mpas_pool_get_array(fg, 'bc_hi', destField2d)
                 ndims = 2
               endif
             else if (trim(field % field) == 'DSTF' ) then
@@ -7363,8 +7437,8 @@ call mpas_log_write('Done with soil consistency check')
 
       call mpas_log_write('min lon $r max lon $r min lat $r max lat $r',realArgs=(/minval(lonPoints),maxval(lonPoints),minval(latPoints),maxval(latPoints)/))
       do iCell=1,nCells
-         lat = latPoints(i)*DEG_PER_RAD
-         lon = lonPoints(i)*DEG_PER_RAD
+         lat = latPoints(iCell)*DEG_PER_RAD
+         lon = lonPoints(iCell)*DEG_PER_RAD
          ! T
          sorted_arr(:,:) = -999.0
          do k = 1, nfglevels_actual
@@ -7530,6 +7604,16 @@ call mpas_log_write('Done with soil consistency check')
             sorted_arrQ10(2,k) = max(0._RKIND,qnifa_fg(k,iCell))
 ! Chemistry
             if (associated(smoke_fine_fg  ) ) sorted_arrQ11(2,k) = max(0._RKIND,smoke_fine_fg(k,iCell))
+            if (associated(sulphate_fg    ) ) sorted_arrQ11(2,k) = max(0._RKIND,sorted_arrQ11(2,k)) &
+                                                                  + max(0._RKIND,sulphate_fg(k,iCell))
+            if (associated(om_ho_fg       ) ) sorted_arrQ11(2,k) = max(0._RKIND,sorted_arrQ11(2,k)) &
+                                                                  + max(0._RKIND,om_ho_fg(k,iCell))
+            if (associated(om_hi_fg       ) ) sorted_arrQ11(2,k) = max(0._RKIND,sorted_arrQ11(2,k)) &
+                                                                  + max(0._RKIND,om_hi_fg(k,iCell))
+            if (associated(bc_ho_fg       ) ) sorted_arrQ11(2,k) = max(0._RKIND,sorted_arrQ11(2,k)) &
+                                                                  + max(0._RKIND,bc_ho_fg(k,iCell))
+            if (associated(bc_hi_fg       ) ) sorted_arrQ11(2,k) = max(0._RKIND,sorted_arrQ11(2,k)) &
+                                                                  + max(0._RKIND,bc_hi_fg(k,iCell))
             if (associated(dust_fine_fg   ) ) sorted_arrQ12(2,k) = max(0._RKIND,dust_fine_fg(k,iCell))
             if (associated(dust_coarse_fg ) ) sorted_arrQ13(2,k) = max(0._RKIND,dust_coarse_fg(k,iCell))
             if (associated(dust1_fg) .and. associated(dust2_fg)) then
@@ -8135,6 +8219,7 @@ call mpas_log_write('Done with soil consistency check')
       real (kind=RKIND), dimension(:,:), pointer :: qnr_fg
 ! Chemistry
       real (kind=RKIND), dimension(:,:), pointer :: smoke_fine_fg, dust_fine_fg, dust_coarse_fg
+      real (kind=RKIND), dimension(:,:), pointer :: sulphate_fg, om_ho_fg, om_hi_fg, bc_ho_fg, bc_hi_fg
       real (kind=RKIND), dimension(:,:), pointer :: dust1_fg, dust2_fg,dust3_fg, dust4_fg, dust5_fg
       real (kind=RKIND), dimension(:,:), pointer :: unspc_fine_fg, unspc_coarse_fg, ssalt_fine_fg, ssalt_coarse_fg
 
@@ -8166,6 +8251,8 @@ call mpas_log_write('Done with soil consistency check')
          extrap_airtemp = 1
       else if (trim(config_extrap_airtemp) == 'lapse-rate') then
          extrap_airtemp = 2
+      else if (trim(config_extrap_airtemp) == 'gfs') then
+         extrap_airtemp = 3
       else
           call mpas_log_write('*************************************************************', messageType=MPAS_LOG_ERR)
           call mpas_log_write('* Invalid value for namelist variable config_extrap_airtemp *', messageType=MPAS_LOG_ERR)
@@ -8235,6 +8322,11 @@ call mpas_log_write('Done with soil consistency check')
       call mpas_pool_get_array(fg, 'qnr', qnr_fg)
 ! Chemistry
       call mpas_pool_get_array(fg, 'smoke_fine', smoke_fine_fg)
+      call mpas_pool_get_array(fg, 'sulphate', sulphate_fg)
+      call mpas_pool_get_array(fg, 'om_ho', om_ho_fg)
+      call mpas_pool_get_array(fg, 'om_hi', om_hi_fg)
+      call mpas_pool_get_array(fg, 'bc_ho', bc_ho_fg)
+      call mpas_pool_get_array(fg, 'bc_hi', bc_hi_fg)
       call mpas_pool_get_array(fg, 'dust_fine', dust_fine_fg)
       call mpas_pool_get_array(fg, 'dust_coarse', dust_coarse_fg)
       call mpas_pool_get_array(fg, 'dust1', dust1_fg)
@@ -8254,6 +8346,11 @@ call mpas_log_write('Done with soil consistency check')
 
       if ( config_smoke_scheme .ne. 'off' ) then
          call mpas_pool_get_array(fg, 'smoke_fine', smoke_fine_fg)
+         call mpas_pool_get_array(fg, 'sulphate', sulphate_fg)
+         call mpas_pool_get_array(fg, 'om_ho', om_ho_fg)
+         call mpas_pool_get_array(fg, 'om_hi', om_hi_fg)
+         call mpas_pool_get_array(fg, 'bc_ho', bc_ho_fg)
+         call mpas_pool_get_array(fg, 'bc_hi', bc_hi_fg)
       endif
       if ( config_dust_scheme .ne. 'off' ) then
          call mpas_pool_get_array(fg, 'dust_fine', dust_fine_fg)
@@ -8387,6 +8484,11 @@ call mpas_log_write('Done with soil consistency check')
              trim(field % field) == 'PRESSURE'.or. &
 ! Chemistry
              trim(field % field) == 'SMKF' .or. &
+             trim(field % field) == 'SULPH' .or. &
+             trim(field % field) == 'OMHO' .or. &
+             trim(field % field) == 'OMHI' .or. &
+             trim(field % field) == 'BCHO' .or. &
+             trim(field % field) == 'BCHI' .or. &
              trim(field % field) == 'UNSF' .or. &
              trim(field % field) == 'UNSC' .or. &
              trim(field % field) == 'DSTF' .or. &
@@ -8625,6 +8727,51 @@ call mpas_log_write('Done with soil consistency check')
                 latPoints => latCell
                 lonPoints => lonCell
                 call mpas_pool_get_array(fg, 'smoke_fine', destField2d)
+                ndims = 2
+              endif
+            else if (trim(field % field) == 'SULPH' ) then
+              if ( config_smoke_scheme .ne. 'off' ) then
+                call mpas_log_write('Interpolating SULPH at $i $r', intArgs=(/k/), realArgs=(/vert_level(k)/))
+                nInterpPoints = nCells
+                latPoints => latCell
+                lonPoints => lonCell
+                call mpas_pool_get_array(fg, 'sulphate', destField2d)
+                ndims = 2
+              endif
+            else if (trim(field % field) == 'OMHO' ) then
+              if ( config_smoke_scheme .ne. 'off' ) then
+                call mpas_log_write('Interpolating OMHO at $i $r', intArgs=(/k/), realArgs=(/vert_level(k)/))
+                nInterpPoints = nCells
+                latPoints => latCell
+                lonPoints => lonCell
+                call mpas_pool_get_array(fg, 'om_ho', destField2d)
+                ndims = 2
+              endif
+            else if (trim(field % field) == 'OMHI' ) then
+              if ( config_smoke_scheme .ne. 'off' ) then
+                call mpas_log_write('Interpolating OMHI at $i $r', intArgs=(/k/), realArgs=(/vert_level(k)/))
+                nInterpPoints = nCells
+                latPoints => latCell
+                lonPoints => lonCell
+                call mpas_pool_get_array(fg, 'om_hi', destField2d)
+                ndims = 2
+              endif
+            else if (trim(field % field) == 'BCHO' ) then
+              if ( config_smoke_scheme .ne. 'off' ) then
+                call mpas_log_write('Interpolating BCHO at $i $r', intArgs=(/k/), realArgs=(/vert_level(k)/))
+                nInterpPoints = nCells
+                latPoints => latCell
+                lonPoints => lonCell
+                call mpas_pool_get_array(fg, 'bc_ho', destField2d)
+                ndims = 2
+              endif
+            else if (trim(field % field) == 'BCHI' ) then
+              if ( config_smoke_scheme .ne. 'off' ) then
+                call mpas_log_write('Interpolating BCHI at $i $r', intArgs=(/k/), realArgs=(/vert_level(k)/))
+                nInterpPoints = nCells
+                latPoints => latCell
+                lonPoints => lonCell
+                call mpas_pool_get_array(fg, 'bc_hi', destField2d)
                 ndims = 2
               endif
             else if (trim(field % field) == 'DSTF' ) then
@@ -9066,6 +9213,16 @@ call mpas_log_write('Done with soil consistency check')
             sorted_arrQ10(2,k) = max(0._RKIND,qnifa_fg(k,iCell))
 ! Chemistry
             if (associated(smoke_fine_fg  ))sorted_arrq11(2,k) = max(0._rkind,smoke_fine_fg(k,icell))
+            if (associated(sulphate_fg    ) ) sorted_arrQ11(2,k) = max(0._RKIND,sorted_arrQ11(2,k)) &
+                                                                  + max(0._RKIND,sulphate_fg(k,iCell))
+            if (associated(om_ho_fg       ) ) sorted_arrQ11(2,k) = max(0._RKIND,sorted_arrQ11(2,k)) &
+                                                                  + max(0._RKIND,om_ho_fg(k,iCell))
+            if (associated(om_hi_fg       ) ) sorted_arrQ11(2,k) = max(0._RKIND,sorted_arrQ11(2,k)) &
+                                                                  + max(0._RKIND,om_hi_fg(k,iCell))
+            if (associated(bc_ho_fg       ) ) sorted_arrQ11(2,k) = max(0._RKIND,sorted_arrQ11(2,k)) &
+                                                                  + max(0._RKIND,bc_ho_fg(k,iCell))
+            if (associated(bc_hi_fg       ) ) sorted_arrQ11(2,k) = max(0._RKIND,sorted_arrQ11(2,k)) &
+                                                                  + max(0._RKIND,bc_hi_fg(k,iCell))
             if (associated(dust_fine_fg   ))sorted_arrq12(2,k) = max(0._rkind,dust_fine_fg(k,icell))
             if (associated(dust_coarse_fg ))sorted_arrq13(2,k) = max(0._rkind,dust_coarse_fg(k,icell))
             if (associated(dust1_fg) .and. associated(dust2_fg)) then
